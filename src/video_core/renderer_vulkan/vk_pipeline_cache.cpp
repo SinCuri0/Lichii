@@ -1899,6 +1899,9 @@ PipelineCache::~PipelineCache() {
     // leaves them on disk.
     SaveUsedPipelines();
     if (use_vulkan_pipeline_cache && !vulkan_pipeline_cache_filename.empty()) {
+        if (!device.CanReadPipelineCacheDuringBuilds()) {
+            workers.WaitForRequests();
+        }
         SerializeVulkanPipelineCache(vulkan_pipeline_cache_filename, vulkan_pipeline_cache,
                                      CACHE_VERSION);
     }
