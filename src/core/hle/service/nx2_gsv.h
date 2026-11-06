@@ -73,6 +73,7 @@
 #include "core/hle/service/nx2_stub_interface.h"
 #include "core/hle/service/nx2_image_layout.h"
 #include "core/hle/service/nx2_video_input_queue.h"
+#include "core/hle/service/nx2_video_frame_queue.h"
 #include "core/hle/service/nx2_present_pacer.h"
 #include "core/hle/service/nx2_video_ready.h"
 #include "core/hle/service/sm/sm.h"
@@ -2653,24 +2654,15 @@ private:
 
     // Ocarina shows one movie frame per game frame: skip late ones on a real clock (m_mutex held).
     static constexpr u64 OcarinaOfTimeMovieProgramId = 0x0400486024DEC000ULL;
-    static constexpr auto MovieClockPause = std::chrono::seconds{1};
 
     bool SyncsToClock() {
         return system.GetApplicationProcessProgramID() == OcarinaOfTimeMovieProgramId;
     }
 
     bool IsLate(u64 pts) const {
-        if (!m_clock_running) {
-            return false;
-        }
-        const auto now = std::chrono::steady_clock::now();
-        if (now - m_clock_last_take > MovieClockPause) {
-            return false;
-        }
-        const auto elapsed =
-            std::chrono::duration_cast<std::chrono::microseconds>(now - m_clock_start).count();
-        const u64 due = m_clock_start_pts + static_cast<u64>((std::max<s64>)(elapsed, 0));
-        return pts + 2 * m_frame_us < due;
+        return IsNx2VideoFrameLate(pts, m_frame_us, m_clock_running, m_clock_start,
+                                  m_clock_start_pts, m_clock_last_take,
+                                  std::chrono::steady_clock::now());
     }
 
     void EndMovieClock() {
@@ -2996,7 +2988,7 @@ private:
                 output = m_outputs.front();
                 m_outputs.pop_front();
                 const auto now = std::chrono::steady_clock::now();
-                if (m_clock_running && now - m_clock_last_take > MovieClockPause) {
+                if (m_clock_running && now - m_clock_last_take > Nx2MovieClockPause) {
                     m_clock_start += now - m_clock_last_take;
                 }
                 m_clock_last_take = now;
@@ -3040,7 +3032,7 @@ private:
         std::unique_lock lk{m_mutex};
         while (true) {
             m_cv.wait(lk, [&] {
-                return m_quit || m_flush || (!m_decoded.empty() && !m_free.empty()) ||
+                return m_quit || m_flush || HasReadyNx2VideoFrame(m_decoded, !m_free.empty()) ||
                        (!m_inputs.Empty() && m_decoded.size() < MaxDecodedAhead);
             });
             if (m_quit) {
@@ -3057,14 +3049,9 @@ private:
                 }
                 continue;
             }
-            if (!m_decoded.empty() && !m_free.empty()) {
-                while (m_decoded.size() > 1 && !m_decoded.front().end &&
-                       IsLate(m_decoded.front().pts)) {
-                    m_decoded.pop_front();
-                    ++m_late_dropped;
-                }
-                Decoded frame = std::move(m_decoded.front());
-                m_decoded.pop_front();
+            if (HasReadyNx2VideoFrame(m_decoded, !m_free.empty())) {
+                Decoded frame = TakeNx2VideoFrame(
+                    m_decoded, [this](u64 pts) { return IsLate(pts); }, m_late_dropped);
                 if (!m_clock_running && frame.picture && !frame.end && SyncsToClock()) {
                     m_clock_running = true;
                     m_clock_start = std::chrono::steady_clock::now();
@@ -3146,24 +3133,7 @@ private:
             if (m_flush) {
                 continue;
             }
-            for (size_t i = 0; i < pictures.size(); ++i) {
-                const u64 pts = pictures[i].pts;
-                const bool last = input.end && i + 1 == pictures.size();
-                if (!last && IsLate(pts)) {
-                    ++m_late_dropped;
-                    continue;
-                }
-                m_decoded.push_back({std::move(pictures[i]), pts, false});
-            }
-            if (input.end) {
-                // The client stops at the frame marked end of stream; give it one even when the
-                // last input held no picture.
-                if (m_decoded.empty()) {
-                    m_decoded.push_back({std::nullopt, input.pts, true});
-                } else {
-                    m_decoded.back().end = true;
-                }
-            }
+            QueueNx2VideoPictures(m_decoded, pictures, input.pts, input.end);
         }
     }
 

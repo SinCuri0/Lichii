@@ -1055,6 +1055,7 @@ add_library(core STATIC
     hle/service/nx2_stub_interface.h
     hle/service/nx2_gsv.h
     hle/service/nx2_video_input_queue.h
+    hle/service/nx2_video_frame_queue.h
     hle/service/nx2_image_layout.h
     hle/service/nx2_present_pacer.h
     hle/service/nx2_video_ready.h
