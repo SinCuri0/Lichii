@@ -277,4 +277,7 @@ else()
     )
 endif()
 
+# MSVC STL 14.51's vectorized std::find static_asserts on this file's key type under clang-cl.
+set_source_files_properties(ir_opt/global_memory_to_storage_buffer_pass.cpp PROPERTIES COMPILE_DEFINITIONS _USE_STD_VECTOR_ALGORITHMS=0)
+
 create_target_directory_groups(shader_recompiler)

@@ -20,6 +20,9 @@
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
 #include "video_core/vulkan_common/vulkan_device.h"
+#ifdef EDEN_OOT_VR_XR
+#include "video_core/renderer_vulkan/vk_oot_vr.h"
+#endif
 #include "video_core/vulkan_common/vulkan_surface.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
@@ -673,6 +676,12 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
         RecreateSwapchain(frame);
     }
 
+#ifdef EDEN_OOT_VR_XR
+    bool xr_copy = false;
+    const VkImage xr_image = OotVr::BeginFrame(device, scheduler.submit_mutex, frame->width,
+                                               frame->height, swapchain.GetImageFormat(), xr_copy);
+#endif
+
     const vk::CommandBuffer cmdbuf{frame->cmdbuf};
     cmdbuf.Begin({
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -774,6 +783,48 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
                          MakeImageCopy(frame->width, frame->height, extent.width, extent.height));
     }
 
+#ifdef EDEN_OOT_VR_XR
+    if (xr_image) {
+        VkImageMemoryBarrier xr_barrier{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .pNext = nullptr,
+            .srcAccessMask = 0,
+            .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+            .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+            .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = xr_image,
+            .subresourceRange{
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        };
+        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                               xr_barrier);
+        if (xr_copy) {
+            cmdbuf.CopyImage(*frame->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, xr_image,
+                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                             MakeImageCopy(frame->width, frame->height, frame->width, frame->height));
+        } else {
+            cmdbuf.BlitImage(*frame->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, xr_image,
+                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                             MakeImageBlit(frame->width, frame->height, frame->width, frame->height),
+                             VK_FILTER_LINEAR);
+        }
+        // The runtime reads headset images in COLOR_ATTACHMENT_OPTIMAL (XR_KHR_vulkan_enable).
+        xr_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        xr_barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
+        xr_barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        xr_barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT,
+                               VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, xr_barrier);
+    }
+#endif
+
     cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT, {},
                            {}, {}, post_barriers);
 
@@ -815,6 +866,10 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
             break;
         }
     }
+
+#ifdef EDEN_OOT_VR_XR
+    OotVr::EndFrame(scheduler.submit_mutex, xr_image != VK_NULL_HANDLE);
+#endif
 
     // Present
     last_present_id = swapchain.Present(render_semaphore);

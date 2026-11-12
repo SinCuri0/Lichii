@@ -214,6 +214,20 @@
         "repo": "jimmy-park/openssl-cmake",
         "version": "3.6.2"
     },
+    "openxr": {
+        "bundled": true,
+        "hash": "50e9149e21f8ee7e9b18367f013ff97ccb4f09da4a23835430eed572e7fadde0d701433773a478348899f47e902ad401486502e5ca64f3052b46774ce4b423c5",
+        "options": [
+            "DYNAMIC_LOADER OFF",
+            "BUILD_API_LAYERS OFF",
+            "BUILD_TESTS OFF",
+            "BUILD_CONFORMANCE_TESTS OFF",
+            "BUILD_SDK_TESTS OFF",
+            "BUILD_WITH_SYSTEM_JSONCPP OFF"
+        ],
+        "repo": "KhronosGroup/OpenXR-SDK",
+        "version": "release-1.1.65"
+    },
     "opus": {
         "bundled": true,
         "find_args": "MODULE",

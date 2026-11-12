@@ -39,6 +39,9 @@
 #ifdef EGLANTINE_STREAMLINE
 #include "video_core/vulkan_common/streamline.h"
 #endif
+#ifdef EDEN_OOT_VR_XR
+#include "video_core/renderer_vulkan/vk_oot_vr.h"
+#endif
 
 #if defined(__ANDROID__) && defined(ARCHITECTURE_arm64)
 #include <adrenotools/bcenabler.h>
@@ -821,6 +824,9 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
     if (device_float16 && WantsAmdFsr4(driver_id)) {
         features.shader_float16_int8.shaderFloat16 = VK_TRUE;
     }
+#ifdef EDEN_OOT_VR_XR
+    OotVr::AddDeviceExtensions(loaded_extensions, supported_extensions);
+#endif
     logical = vk::Device::Create(physical, queue_cis, ExtensionListForVulkan(loaded_extensions), first_next, dld);
 
     graphics_queue = logical.GetQueue(graphics_family);

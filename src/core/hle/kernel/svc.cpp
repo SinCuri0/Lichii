@@ -15,6 +15,7 @@
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/svc.h"
 #include "core/hle/kernel/svc/svc_nx2_oot_poll.h"
+#include "core/hle/kernel/svc/svc_nx2_oot_vr.h"
 #include "core/hle/kernel/k_readable_event.h"
 #include "core/hle/service/kernel_helpers.h"
 
@@ -2545,6 +2546,8 @@ void Call(Core::System& system, u32 imm) {
     if (CallNx2OotPollBackoff(system, imm)) {
         // Ocarina of Time resource poll backoff (svc 0xF3, svc_nx2_oot_poll.cpp); the arguments
         // go back unchanged.
+    } else if (CallNx2OotVr(system, imm, args)) {
+        // Ocarina of Time VR camera (svc 0xF4, svc_nx2_oot_vr.cpp): x2 and x4 may change.
     } else if (imm == 0x80) {
         // Switch 2 only: svcSetGpuMemoryAttribute(address, size, mask, attr). nn::gpu::sdk and
         // nn::gs native memory set the new "GPU accessible" attribute (0x20) before registering

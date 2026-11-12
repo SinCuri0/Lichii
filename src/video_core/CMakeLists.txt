@@ -638,4 +638,18 @@ if (ENABLE_NVIDIA_DLSS)
     message(STATUS "NVIDIA DLSS through Streamline: ${STREAMLINE_INCLUDE_DIR}")
 endif()
 
+# Ocarina of Time VR: the game picture in an OpenXR headset (EDEN_NX2_OOT_VR=1 at launch). The
+# Khronos OpenXR loader is built in statically; the runtime (SteamVR or another) comes from the PC.
+cmake_dependent_option(ENABLE_OOT_VR "Enable the Ocarina of Time OpenXR headset output" ON
+                       "WIN32 AND ARCHITECTURE_x86_64" OFF)
+if (ENABLE_OOT_VR)
+    AddJsonPackage(openxr)
+    target_sources(video_core PRIVATE
+        renderer_vulkan/vk_oot_vr.cpp
+        renderer_vulkan/vk_oot_vr.h
+    )
+    target_link_libraries(video_core PRIVATE OpenXR::openxr_loader)
+    target_compile_definitions(video_core PRIVATE EDEN_OOT_VR_XR)
+endif()
+
 create_target_directory_groups(video_core)

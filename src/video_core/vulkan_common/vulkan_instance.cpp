@@ -23,6 +23,9 @@
 #include <string>
 #include "video_core/vulkan_common/streamline.h"
 #endif
+#ifdef EDEN_OOT_VR_XR
+#include "video_core/renderer_vulkan/vk_oot_vr.h"
+#endif
 
 namespace Vulkan {
 namespace {
@@ -101,6 +104,9 @@ namespace {
             extensions.push_back(name.c_str());
         }
     }
+#endif
+#ifdef EDEN_OOT_VR_XR
+    OotVr::AddInstanceExtensions(extensions, properties);
 #endif
     return extensions;
 }

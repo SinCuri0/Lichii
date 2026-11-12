@@ -278,6 +278,24 @@ constexpr std::array POLL_BACKOFF_RECORDS{
     BuiltinPatchRecord{.module_offset = 0x1708C, .bytes = POLL_BACKOFF_RETURN, .checked = true, .original = 0},
 };
 
+// VR camera: the renderer's set-view function (main+0x33A410) loads its view count with
+// `ldr w10, [x0, #0x10]` at main+0x33A428. That word becomes `svc #0xf4`, which does the load and
+// points the view at a head-turned copy (core/hle/kernel/svc/svc_nx2_oot_vr.cpp).
+constexpr std::array<u8, 4> VR_SET_VIEW_SVC{0x81, 0x1E, 0x00, 0xD4}; // svc #0xf4
+constexpr std::array<u8, 4> VR_CAMERA_SOURCE_SVC{0xA1, 0x1E, 0x00, 0xD4}; // svc #0xf5
+constexpr std::array VR_CAMERA_RECORDS{
+    BuiltinPatchRecord{.module_offset = 0x33A428,
+                       .bytes = VR_SET_VIEW_SVC,
+                       .checked = true,
+                       .original = 0xB940100A}, // ldr w10, [x0, #0x10]
+    // The camera controller update has just written the camera's view object: turn it there, so
+    // culling and shadows use the head pose too.
+    BuiltinPatchRecord{.module_offset = 0x4C5068,
+                       .bytes = VR_CAMERA_SOURCE_SVC,
+                       .checked = true,
+                       .original = 0xF9401268}, // ldr x8, [x19, #0x20]
+};
+
 constexpr std::array BUILTIN_PATCHES{
     BuiltinPatch{
         .name = "Max Resolution (built-in)",
@@ -333,6 +351,14 @@ constexpr std::array BUILTIN_PATCHES{
         .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
         .records = POLL_BACKOFF_RECORDS,
         .enable_env = "EDEN_NX2_OOT_POLL_BACKOFF",
+    },
+    BuiltinPatch{
+        .name = "VR camera (built-in, EDEN_NX2_OOT_VR=1)",
+        .title_id = 0x0400486024DEC000,
+        .module = "main",
+        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
+        .records = VR_CAMERA_RECORDS,
+        .enable_env = "EDEN_NX2_OOT_VR",
     },
 };
 
