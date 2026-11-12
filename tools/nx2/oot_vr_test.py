@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import struct
 import subprocess
 import sys
@@ -90,7 +91,9 @@ def main():
     ap.add_argument("--hold", type=float, default=0, help="seconds with the real head pose before the test turns")
     ap.add_argument("--sweep", type=float, default=0, help="slow turn: degrees per shot from -60 to 60")
     ap.add_argument("--fake-tan", default="1.842,1.330", help="headset FOV tangents without a headset")
-    ap.add_argument("--play", action="store_true", help="load the save, then leave the game open: no shots, no test turns")
+    ap.add_argument("--run", action="store_true", help="run forward and roll, with shots during it")
+    ap.add_argument("--menu", default="", help="buttons to press after loading, e.g. Plus,R,Plus, with a shot after each")
+    ap.add_argument("--play",action="store_true", help="load the save, then leave the game open: no shots, no test turns")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     log_dir = os.path.join(os.path.dirname(a.exe), "user", "log")
@@ -101,6 +104,13 @@ def main():
     env.pop("EDEN_NX2_OOT_VR_FAKE_YAW", None)
     env.pop("EDEN_NX2_OOT_VR_FAKE_PITCH", None)
     config = os.path.join(os.path.dirname(a.exe), "user", "config", "qt-config.ini")
+    # A run stopped before its end leaves this file: its config still has the owner's controller.
+    backup = config + ".vrtest-backup"
+    if os.path.exists(backup):
+        os.replace(backup, config)
+        step("restored the controller settings an earlier stopped run left unmapped")
+    if not a.play:
+        shutil.copyfile(config, backup)
     original = open(config, encoding="utf-8").read() if a.play else unmap_pads(config)
     step("starting the emulator" if a.play else "starting the emulator (its controller unmapped until the test ends)")
     proc = subprocess.Popen([a.exe, "-g", a.game], env=env)
@@ -146,6 +156,25 @@ def main():
         if a.hold > 0:
             step(f"LOOK AROUND NOW: {a.hold:.0f} s with your real head pose")
             time.sleep(a.hold)
+        if a.run:
+            set_pose(base, 1, 0.0)
+            steps =[{"left_stick": [0, 1], "frames": 40}, {"left_stick": [0, 1], "buttons": ["A"], "frames": 6},
+                     {"left_stick": [0, 1], "frames": 40}]
+            runner = subprocess.Popen([sys.executable, "-I", os.path.join(HERE, "debug_mcp.py"), "--server", PORT,
+                                       "--call", json.dumps({"method": "input_sequence", "params": {"steps": steps}})])
+            for n in range(10):
+                time.sleep(0.3)
+                call("screenshot", out=os.path.join(a.out, f"run_{n:02d}.png"))
+            runner.wait(timeout=60)
+            step("run done: 10 shots")
+        if a.menu:
+            for n, button in enumerate(a.menu.split(",")):
+                press(button, 90)
+                time.sleep(3)
+                call("screenshot", out=os.path.join(a.out, f"menu_{n}_{button}.png"))
+                step(f"menu: pressed {button}")
+            step("menu done")
+            return
         if a.sweep > 0:
             steps = int(120 / a.sweep)
             for n in range(steps + 1):
@@ -166,6 +195,8 @@ def main():
         proc.terminate()
         proc.wait(timeout=30)
         open(config, "w", encoding="utf-8", newline="").write(original)
+        if os.path.exists(backup):
+            os.remove(backup)
 
 
 if __name__ == "__main__":

@@ -15,6 +15,7 @@
 #include <fmt/ranges.h>
 
 #include "common/logging.h"
+#include "common/oot_vr.h"
 #include <ranges>
 #include "common/scope_exit.h"
 #include "common/settings.h"
@@ -73,6 +74,22 @@ constexpr VkExtent2D CaptureImageSize{
     };
 }
 #endif
+
+// VR: the game's scaled size, so the headset gets every rendered pixel.
+[[nodiscard]] Layout::FramebufferLayout FrameLayout(const Core::Frontend::EmuWindow& window,
+                                                    std::span<const Tegra::FramebufferConfig> framebuffers) {
+#ifdef EDEN_OOT_VR_XR
+    if (Common::OotVr::HeadsetWanted() && !framebuffers.empty()) {
+        const auto& framebuffer = framebuffers.front();
+        const bool cropped = !framebuffer.crop_rect.IsEmpty();
+        const u32 width = cropped ? static_cast<u32>(framebuffer.crop_rect.GetWidth()) : framebuffer.width;
+        const u32 height = cropped ? static_cast<u32>(framebuffer.crop_rect.GetHeight()) : framebuffer.height;
+        const float up = Settings::values.resolution_info.up_factor;
+        return Layout::DefaultFrameLayout(static_cast<u32>(width * up), static_cast<u32>(height * up));
+    }
+#endif
+    return window.GetFramebufferLayout();
+}
 
 constexpr VkExtent3D CaptureImageExtent{
     .width = VideoCore::Capture::LinearWidth,
@@ -232,7 +249,7 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
 
     scheduler.RequestOutsideRenderPassOperationContext();
     blit_swapchain.DrawToFrame(device, rasterizer, frame, framebuffers,
-                               render_window.GetFramebufferLayout(),
+                               FrameLayout(render_window, framebuffers),
                                present_manager.SwapchainImageCount(),
                                swapchain.GetImageViewFormat());
 
@@ -245,7 +262,7 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
     const size_t generated_frames = frame_gen.GeneratedFrameCount();
     for (size_t generation = 0; generation < generated_frames; ++generation) {
         Frame* generated = present_manager.GetRenderFrame();
-        blit_swapchain.PrepareFrame(device, generated, render_window.GetFramebufferLayout());
+        blit_swapchain.PrepareFrame(device, generated, FrameLayout(render_window, framebuffers));
         frame_gen.GenerateInto(device, generated, generation);
         generated->render_tick = scheduler.Flush(*generated->render_ready);
         present_manager.Present(generated);

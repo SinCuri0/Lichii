@@ -1,13 +1,16 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <utility>
+#include <vector>
 
 #include "common/logging.h"
 #include "common/oot_vr.h"
@@ -34,7 +37,23 @@ constexpr u64 CameraSiteOffset = 0x4C5068;
 constexpr u64 CopyOffset = 0x4E9FF00;
 // {u32 mode, f32 yaw, f32 pitch} for tests, after the two view copies.
 constexpr u64 TestPoseOffset = 0x4E9FFF0;
-constexpr float Deg = 0.017453292519943295f;
+// The camera target update (main+0x32A4C40): `mov x21, x0` becomes svc 0xF6, x0 = the followed actor.
+constexpr u32 TargetSvc = 0xF6;
+constexpr u64 TargetSiteOffset = 0x32A4DE4;
+constexpr u64 LinkVtableOffset = 0x4B25E18;
+// The skinning matrices (main+0x14E0200): `mov x19, x0` becomes svc 0xF7, x0 = a skeleton.
+constexpr u32 SkeletonSvc = 0xF7;
+constexpr u64 SkeletonSiteOffset = 0x14E0220;
+constexpr u32 HeadBone = 103;
+constexpr float HeadScale = 0.001f;
+// Metres from Link's head bone (the top of his neck) up to the eye.
+constexpr float EyeUpM = 0.15f;
+// Eye forward per metre Link's head is below standing height (rolls, crawls); StandFollowM is per camera update.
+constexpr float LowForwardPerM = 0.8f;
+constexpr float MaxLowForwardM = 0.5f;
+constexpr float StandFollowM = 0.0002f;
+// Metres in front of the head bone, along Link's facing (EDEN_NX2_OOT_VR_EYE_FWD).
+constexpr float EyeForwardM = 0.1f;constexpr float Deg = 0.017453292519943295f;
 // The displayed camera's set-view call returns here (main+0x33A240); other view-0 callers are probes.
 constexpr u64 DisplayCallerOffset = 0x33A2D8;
 // The main projection object's vtable; its 4x4 matrix is at +0xC (P00) and +0xC + 20 (P11).
@@ -46,6 +65,9 @@ constexpr u64 ProjectionCopyOffset = 0x4E9F000;
 constexpr u64 ProjectionCopySize = 0x100;
 // Turned copies of views 1 and 2 (0x60 each), after the three projection copies.
 constexpr u64 ViewCopyOffset = 0x4E9F300;
+// {f32 size, u32 on} read by the VR HUD code (patch_manager.cpp, tools/nx2/oot_vr_hud.s).
+constexpr u64 HudParamsOffset = 0x4E9F800;
+constexpr u64 UiManagerPtrOffset = 0x4C7E098;
 
 struct Head {
     std::array<float, 3> fwd;
@@ -140,6 +162,10 @@ bool GetHead(Core::Memory::Memory& memory, u64 main_base, bool display, Head& he
     const float hyaw = std::atan2(-fx, -fz), hpitch = std::asin(std::fmax(-1.0f, std::fmin(1.0f, fy)));
     head.fwd = {-std::sin(hyaw) * std::cos(hpitch), std::sin(hpitch), -std::cos(hyaw) * std::cos(hpitch)};
     head.pos = pose.position;
+    // The pose the picture is drawn with: yaw about y, then pitch about x, no roll.
+    const float sy = std::sin(hyaw / 2), cy = std::cos(hyaw / 2);
+    const float sp = std::sin(hpitch / 2), cp = std::cos(hpitch / 2);
+    pose.orientation = {cy * sp, sy * cp, -sy * sp, cy * cp};
     head.from_headset = true;
     head.pose = pose;
     return true;
@@ -201,6 +227,9 @@ void NoteViewPose(u64 view_object, const Common::OotVr::HeadPose& pose) {
     g_view_pose[0] = {view_object, pose};
 }
 
+// The eye the next drawn frame's camera moves to; set-view flips it after each drawn frame.
+std::atomic<int> g_next_eye{};
+
 bool ViewPose(u64 view_object, Common::OotVr::HeadPose& pose) {
     std::scoped_lock lk{g_view_pose_lock};
     for (const auto& [object, saved] : g_view_pose) {
@@ -212,10 +241,193 @@ bool ViewPose(u64 view_object, Common::OotVr::HeadPose& pose) {
     return false;
 }
 
+std::atomic<u64> g_link{}; ///< Link's actor: feet float3 +0x31C, "Player" object +0x8
+std::mutex g_head_lock;
+std::array<float, 3> g_head{}; ///< Link's head bone in the world, metres
+std::array<float, 3> g_head_feet{}; ///< Link's feet when g_head was taken
+bool g_has_head = false;
+
+// Link's body skeleton: actor +0x8 -> +0x70 parts -> +0xB0 body model -> +0x398.
+u64 LinkSkeleton(Core::Memory::Memory& memory, u64 link) {
+    const u64 player = memory.Read64(link + 0x8);
+    const u64 parts = player ? memory.Read64(player + 0x70) : 0;
+    const u64 model = parts ? memory.Read64(parts + 0xB0) : 0;
+    return model ? memory.Read64(model + 0x398) : 0;
+}
+
+// Skeleton resource: bone count u16 +0x38, bones +0x10 (0x58 each, parent u16 +0x22).
+const std::vector<u16>& HeadBones(Core::Memory::Memory& memory, u64 resource) {
+    static u64 cached = 0;
+    static std::vector<u16> bones;
+    if (cached == resource) {
+        return bones;
+    }
+    cached = resource;
+    bones.clear();
+    const u32 count = memory.Read16(resource + 0x38);
+    const u64 table = memory.Read64(resource + 0x10);
+    const auto parent = [&](u32 b) { return memory.Read16(table + b * 0x58 + 0x22); };
+    if (count <= HeadBone || count > 1024 || parent(HeadBone) != HeadBone - 1) {
+        LOG_WARNING(Kernel_SVC, "OoT VR camera: Link's skeleton has {} bones and no head bone where expected", count);
+        return bones;
+    }
+    for (u32 b = 0; b < count; ++b) {
+        u32 k = b;
+        for (int depth = 0; k != HeadBone && k < count && depth < 64; ++depth) {
+            k = parent(k);
+        }
+        if (k == HeadBone) {
+            bones.push_back(static_cast<u16>(b));
+        }
+    }
+    LOG_INFO(Kernel_SVC, "OoT VR camera: Link's skeleton has {} bones, {} in the head", count, bones.size());
+    return bones;
+}
+
+// World matrices at skeleton +0x20: 0x40 bytes per bone, 4 columns of 4 floats, from a local origin.
+void LinkSkeletonUpdate(Core::Memory::Memory& memory, u64 skeleton) {
+    const u64 link = g_link.load(std::memory_order_relaxed);
+    if (!link || skeleton != LinkSkeleton(memory, link)) {
+        return;
+    }
+    const u64 world = memory.Read64(skeleton + 0x20);
+    std::array<float, 16> root, head;
+    std::array<float, 3> feet;
+    memory.ReadBlock(world, root.data(), sizeof(root));
+    memory.ReadBlock(world + 0x40 * HeadBone, head.data(), sizeof(head));
+    memory.ReadBlock(link + 0x31C, feet.data(), sizeof(feet));
+    {
+        std::scoped_lock lk{g_head_lock};
+        for (int k = 0; k < 3; ++k) {
+            g_head[k] = feet[k] + head[12 + k] - root[12 + k];
+        }
+        g_head_feet = feet;
+        g_has_head = true;
+    }
+    if (!Common::OotVr::FirstPerson()) {
+        return;
+    }
+    std::array<float, 16> hidden{};
+    hidden[0] = hidden[5] = hidden[10] = HeadScale;
+    hidden[12] = head[12], hidden[13] = head[13], hidden[14] = head[14], hidden[15] = head[15];
+    for (const u16 bone : HeadBones(memory, memory.Read64(skeleton))) {
+        memory.WriteBlock(world + 0x40 * bone, hidden.data(), sizeof(hidden));
+    }
+}
+
+// The skinning runs after the camera, so the head is last frame's: move it by Link's feet since then.
+bool LinkHead(Core::Memory::Memory& memory, std::array<float, 3>& head) {
+    const u64 link = g_link.load(std::memory_order_relaxed);
+    std::array<float, 3> feet;
+    if (!link || !memory.ReadBlock(link + 0x31C, feet.data(), sizeof(feet))) {
+        return false;
+    }
+    // Link's rotation, 3x3 rows: his forward is the third column (seen while running).
+    std::array<float, 9> rot;
+    memory.ReadBlock(link + 0x328, rot.data(), sizeof(rot));
+    static const float forward_m = [] {
+        const char* const v = std::getenv("EDEN_NX2_OOT_VR_EYE_FWD");
+        return v && *v ? static_cast<float>(std::atof(v)) : EyeForwardM;
+    }();
+    std::scoped_lock lk{g_head_lock};
+    static float stand = 0;
+    const float above = g_head[1] - g_head_feet[1];
+    stand = std::fmax(above, stand - StandFollowM);
+    const float forward = forward_m + std::fmin((stand - above) * LowForwardPerM, MaxLowForwardM);
+    for (int k = 0; k < 3; ++k) {
+        head[k] = g_head[k] - g_head_feet[k] + feet[k] + rot[2 + 3 * k] * forward;
+    }
+    return g_has_head;
+}
+
 // Projection +0xA0 fovy, +0xA4 sin(fovy/2), +0xA8 cos(fovy/2), +0xAC tan(fovy/2), +0xB0 aspect.
 std::array<float, 5> WideFields(float tan_x, float tan_y) {
     const float half = std::atan(tan_y);
     return {2 * half, std::sin(half), std::cos(half), tan_y, tan_x / tan_y};
+}
+
+std::atomic<bool> g_menu_now{};          ///< a game menu is open now
+std::atomic<int> g_turned_after_menu{99}; ///< camera updates with the head pose since the last menu
+constexpr int TurnedAfterMenu = 4;       ///< the flat screen stays until this many such updates
+
+struct UiScreen {
+    u32 id;
+    const char* name;
+    bool menu;
+};
+
+constexpr std::array<UiScreen, 12> WatchedScreens{{
+    {0xc0a4dec4, "PlusMenu_00", true},
+    {0xf5b7168b, "MenuBG_00", true},
+    {0x7ecad8bd, "ImportantMenu_00", true},
+    {0x3bc00454, "ChallengeMenu_00", true},
+    {0x41d368be, "SystemBG_00", true},
+    {0x8f87396d, "MessageLog_01", false},
+    {0x20d55c5a, "MenuOverlay_00", false},
+    {0xc3332ad4, "MapMenu_00", false},
+    {0x5c7f1c3c, "PlayerStatus_00", false},
+    {0x2e6867e2, "Talk_00", false},
+    {0xf91df64d, "MessageDialog_00", false},
+    {0x5528d3d9, "CtrlGuide_00", false},
+}};
+
+// Screen open: byte +0x1A6 == 2 and signed byte +0x1A5 >= 0 (main+0xA687F0); UI manager layout in docs/vr-port-notes.md (recomp).
+void UpdateMenuOpen(Core::Memory::Memory& memory, u64 main_base) {
+    static u32 frame = 0;
+    if (frame++ % 3 != 0) {
+        return;
+    }
+    const u64 holder = memory.Read64(main_base + UiManagerPtrOffset);
+    const u64 manager = holder ? memory.Read64(holder) : 0;
+    const u64 map = manager ? memory.Read64(manager + 0x48) : 0;
+    if (!map) {
+        return;
+    }
+    const u32 capacity = std::min(memory.Read32(map + 0x24), 4096u);
+    const u32 count = std::min(memory.Read32(manager + 0x8), 4096u);
+    std::vector<std::array<u32, 2>> entries(capacity);
+    std::vector<u64> screens(count);
+    if (capacity == 0 || !memory.ReadBlock(memory.Read64(map + 0x18), entries.data(), capacity * 8) ||
+        !memory.ReadBlock(memory.Read64(manager + 0x10), screens.data(), count * 8)) {
+        return;
+    }
+    static std::array<int, WatchedScreens.size()> last;
+    static bool started = false;
+    if (!started) {
+        last.fill(-1);
+        started = true;
+    }
+    bool menu = false;
+    for (size_t w = 0; w < WatchedScreens.size(); ++w) {
+        const u32 id = WatchedScreens[w].id;
+        u32 index = count;
+        for (u32 k = 0, i = id % capacity; k < capacity && entries[i][0] != 0; ++k, i = (i + 1) % capacity) {
+            if (entries[i][0] == id) {
+                index = entries[i][1];
+                break;
+            }
+        }
+        if (index >= count || !screens[index]) {
+            continue;
+        }
+        std::array<s8, 2> state;
+        memory.ReadBlock(screens[index] + 0x1A5, state.data(), state.size());
+        const int open = state[1] == 2 && state[0] >= 0;
+        menu |= open && WatchedScreens[w].menu;
+        if (open != last[w]) {
+            LOG_INFO(Kernel_SVC, "OoT VR HUD: {} {} (+0x1A5 {}, +0x1A6 {})", WatchedScreens[w].name,
+                     open ? "open" : "closed", state[0], state[1]);
+            last[w] = open;
+        }
+    }
+    g_menu_now.store(menu, std::memory_order_relaxed);
+    if (menu) {
+        g_turned_after_menu.store(0, std::memory_order_relaxed);
+    }
+    const bool show_menu = menu || g_turned_after_menu.load(std::memory_order_relaxed) < TurnedAfterMenu;
+    if (Common::OotVr::MenuOpen().exchange(show_menu) != show_menu) {
+        LOG_INFO(Kernel_SVC, "OoT VR HUD: menu {}", show_menu ? "open: flat screen" : "closed: world");
+    }
 }
 
 // View object: 3x4 view at +0x8, eye float3 +0x38, look-at float3 +0x44, up float3 +0x50, eye
@@ -248,18 +460,45 @@ void CameraSource(Core::Memory::Memory& memory, u64 main_base, u64 view_object) 
         memory.Write8(projection + 0x8, 1);
     }
     Head head;
-    if (!GetHead(memory, main_base, false, head)) {
+    if (g_menu_now.load(std::memory_order_relaxed) || !GetHead(memory, main_base, false, head)) {
         return;
     }
-    if (head.from_headset) {
-        NoteViewPose(view_object, head.pose);
+    g_turned_after_menu.fetch_add(1, std::memory_order_relaxed);
+    // A stereo pair: the right-eye frame reuses the left-eye frame's game camera and head position.
+    static std::array<float, 12> pair_m{};
+    static std::array<float, 3> pair_head{};
+    static bool has_pair = false;
+    const int frame_eye = g_next_eye.load(std::memory_order_relaxed);
+    const bool second = frame_eye == 1 && has_pair;
+    if (second) {
+        head.pose.position = pair_head;
     }
+    std::array<float, 3> at_eye;
+    bool stereo = false;
+    if (Common::OotVr::StereoWanted() && Common::OotVr::EyePosition(head.pose, frame_eye, at_eye)) {
+        head.pos = at_eye;
+        head.pose.eye = frame_eye;
+        stereo = true;
+    }
+    NoteViewPose(view_object, head.pose);
     std::array<float, 12> m;
     std::array<float, 6> eye_at;
     memory.ReadBlock(view_object + 0x8, m.data(), sizeof(m));
     memory.ReadBlock(view_object + 0x38, eye_at.data(), sizeof(eye_at));
     const float dx = eye_at[3] - eye_at[0], dy = eye_at[4] - eye_at[1], dz = eye_at[5] - eye_at[2];
     const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+    std::array<float, 3> head_at;
+    if (Common::OotVr::FirstPerson() && LinkHead(memory, head_at)) {
+        head_at[1] += EyeUpM;
+        for (int i = 0; i < 3; ++i) {
+            m[i * 4 + 3] = -(m[i * 4] * head_at[0] + m[i * 4 + 1] * head_at[1] + m[i * 4 + 2] * head_at[2]);
+        }
+    }
+    if (stereo && second) {
+        m = pair_m;
+    } else if (stereo && frame_eye == 0) {
+        pair_m = m, pair_head = head.pose.position, has_pair = true;
+    }
     TurnView(m.data(), head, MoveScale());
     memory.WriteBlock(view_object + 0x8, m.data(), sizeof(m));
     std::array<float, 3> eye;
@@ -277,7 +516,7 @@ void CameraSource(Core::Memory::Memory& memory, u64 main_base, u64 view_object) 
 } // Anonymous namespace
 
 bool CallNx2OotVr(Core::System& system, u32 imm, std::span<u64, 8> args) {
-    if (imm != VrSvc && imm != CameraSvc) {
+    if (imm != VrSvc && imm != CameraSvc && imm != TargetSvc && imm != SkeletonSvc) {
         return false;
     }
     auto& kernel = system.Kernel();
@@ -289,6 +528,23 @@ bool CallNx2OotVr(Core::System& system, u32 imm, std::span<u64, 8> args) {
     auto& memory = process.GetMemory();
     ThreadContext ctx{};
     arm->GetContext(ctx);
+    if (imm == TargetSvc) {
+        ctx.r[21] = ctx.r[0];
+        arm->SetContext(ctx);
+        const u64 site = ((ctx.pc - TargetSiteOffset) & 0xFFF) == 0 ? ctx.pc : ctx.pc - 4;
+        const u64 main_base = site - TargetSiteOffset;
+        if (ctx.r[0] && memory.Read64(ctx.r[0]) == main_base + LinkVtableOffset &&
+            g_link.exchange(ctx.r[0], std::memory_order_relaxed) != ctx.r[0]) {
+            LOG_INFO(Kernel_SVC, "OoT VR camera: Link's actor {:#x}", ctx.r[0]);
+        }
+        return true;
+    }
+    if (imm == SkeletonSvc) {
+        ctx.r[19] = ctx.r[0];
+        arm->SetContext(ctx);
+        LinkSkeletonUpdate(memory, ctx.r[0]);
+        return true;
+    }
     if (imm == CameraSvc) {
         ctx.r[8] = memory.Read64(ctx.r[19] + 0x20);
         arm->SetContext(ctx);
@@ -343,6 +599,18 @@ bool CallNx2OotVr(Core::System& system, u32 imm, std::span<u64, 8> args) {
             Common::OotVr::HeadPose drawn;
             if (ViewPose(args[2] - 8, drawn)) {
                 Common::OotVr::RecordApplied(drawn);
+                static int last_eye = -1;
+                static u64 frames = 0, flips = 0;
+                flips += drawn.eye >= 0 && drawn.eye != last_eye;
+                last_eye = drawn.eye;
+                if (++frames % 60 == 0) {
+                    LOG_INFO(Kernel_SVC, "OoT VR camera: {} eye changes in the last 60 drawn frames (eye now {})",
+                             flips, drawn.eye);
+                    flips = 0;
+                }
+                if (drawn.eye >= 0) {
+                    g_next_eye.store(1 - drawn.eye, std::memory_order_relaxed);
+                }
             }
             g_display_projection.store(args[3], std::memory_order_relaxed);
             float p00, p11;
@@ -357,6 +625,21 @@ bool CallNx2OotVr(Core::System& system, u32 imm, std::span<u64, 8> args) {
             }
             float tan_x, tan_y;
             if (Common::OotVr::HeadsetTan(tan_x, tan_y)) {
+                const int hud_eye = g_next_eye.load(std::memory_order_relaxed);
+                const float hud_shift = Common::OotVr::HudShift(hud_eye, tan_x);
+                static u64 hud_frames = 0;
+                if (hud_frames++ % 120 < 2) {
+                    LOG_INFO(Kernel_SVC, "OoT VR HUD: eye {} moves the HUD {:+.1f} sideways", hud_eye, hud_shift);
+                }
+                const std::array<u32, 8> hud_params{std::bit_cast<u32>(Common::OotVr::HudSize().load()), 1,
+                                                    std::bit_cast<u32>(Common::OotVr::HudPull().load()),
+                                                    std::bit_cast<u32>(Common::OotVr::MapY().load()),
+                                                    std::bit_cast<u32>(Common::OotVr::TextScale(tan_x)),
+                                                    std::bit_cast<u32>(Common::OotVr::PromptY().load()),
+                                                    std::bit_cast<u32>(Common::OotVr::TalkY().load()),
+                                                    std::bit_cast<u32>(hud_shift)};
+                memory.WriteBlock(main_base + HudParamsOffset, hud_params.data(), sizeof(hud_params));
+                UpdateMenuOpen(memory, main_base);
                 std::array<u8, ProjectionCopySize> object;
                 memory.ReadBlock(args[3], object.data(), object.size());
                 p00 = 1.0f / tan_x, p11 = 1.0f / tan_y;
