@@ -406,6 +406,12 @@ VkImage BeginFrame(const Device& device, std::mutex& queue_lock, u32 width, u32 
         return v && *v ? std::strtoull(v, nullptr, 10) % Common::OotVr::AppliedRing : DefaultLag;
     }();
     X.has_sent = Common::OotVr::AppliedPose(lag, X.sent);
+    static u64 presents = 0, first_applied = 0;
+    if (presents++ % 300 == 0) {
+        const u64 applied = Common::OotVr::AppliedCount();
+        LOG_INFO(Render_Vulkan, "OoT VR: {} drawn-frame poses in the last 300 presents", applied - first_applied);
+        first_applied = applied;
+    }
     X.frame_state = {XR_TYPE_FRAME_STATE};
     if (!Ok(xrWaitFrame(X.session, nullptr, &X.frame_state), "xrWaitFrame")) {
         return VK_NULL_HANDLE;

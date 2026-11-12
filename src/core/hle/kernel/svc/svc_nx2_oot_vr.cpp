@@ -6,6 +6,8 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
+#include <utility>
 
 #include "common/logging.h"
 #include "common/oot_vr.h"
@@ -48,6 +50,8 @@ constexpr u64 ViewCopyOffset = 0x4E9F300;
 struct Head {
     std::array<float, 3> fwd;
     std::array<float, 3> pos;
+    bool from_headset = false;
+    Common::OotVr::HeadPose pose; ///< the headset pose, when from_headset
 };
 
 float Normalize(float* v) {
@@ -136,6 +140,8 @@ bool GetHead(Core::Memory::Memory& memory, u64 main_base, bool display, Head& he
     const float hyaw = std::atan2(-fx, -fz), hpitch = std::asin(std::fmax(-1.0f, std::fmin(1.0f, fy)));
     head.fwd = {-std::sin(hyaw) * std::cos(hpitch), std::sin(hpitch), -std::cos(hyaw) * std::cos(hpitch)};
     head.pos = pose.position;
+    head.from_headset = true;
+    head.pose = pose;
     return true;
 }
 
@@ -180,6 +186,32 @@ void NoteDisplayView(u64 view_object) {
 }
 std::atomic<u64> g_display_projection{}; ///< the displayed camera's projection object (set-view x3)
 
+// The head pose each displayed view object was last turned with, recorded once per drawn frame.
+std::mutex g_view_pose_lock;
+std::array<std::pair<u64, Common::OotVr::HeadPose>, 4> g_view_pose{};
+
+void NoteViewPose(u64 view_object, const Common::OotVr::HeadPose& pose) {
+    std::scoped_lock lk{g_view_pose_lock};
+    for (auto& [object, saved] : g_view_pose) {
+        if (object == view_object || object == 0) {
+            object = view_object, saved = pose;
+            return;
+        }
+    }
+    g_view_pose[0] = {view_object, pose};
+}
+
+bool ViewPose(u64 view_object, Common::OotVr::HeadPose& pose) {
+    std::scoped_lock lk{g_view_pose_lock};
+    for (const auto& [object, saved] : g_view_pose) {
+        if (object == view_object) {
+            pose = saved;
+            return true;
+        }
+    }
+    return false;
+}
+
 // Projection +0xA0 fovy, +0xA4 sin(fovy/2), +0xA8 cos(fovy/2), +0xAC tan(fovy/2), +0xB0 aspect.
 std::array<float, 5> WideFields(float tan_x, float tan_y) {
     const float half = std::atan(tan_y);
@@ -216,8 +248,11 @@ void CameraSource(Core::Memory::Memory& memory, u64 main_base, u64 view_object) 
         memory.Write8(projection + 0x8, 1);
     }
     Head head;
-    if (!GetHead(memory, main_base, true, head)) {
+    if (!GetHead(memory, main_base, false, head)) {
         return;
+    }
+    if (head.from_headset) {
+        NoteViewPose(view_object, head.pose);
     }
     std::array<float, 12> m;
     std::array<float, 6> eye_at;
@@ -305,6 +340,10 @@ bool CallNx2OotVr(Core::System& system, u32 imm, std::span<u64, 8> args) {
     if (SourceMode()) {
         if (display && memory.Read64(args[3]) == main_base + ProjectionVtableOffset) {
             NoteDisplayView(args[2] - 8);
+            Common::OotVr::HeadPose drawn;
+            if (ViewPose(args[2] - 8, drawn)) {
+                Common::OotVr::RecordApplied(drawn);
+            }
             g_display_projection.store(args[3], std::memory_order_relaxed);
             float p00, p11;
             memory.ReadBlock(args[3] + 0xC, &p00, 4);

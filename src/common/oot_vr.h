@@ -42,7 +42,7 @@ struct State {
     bool has_head = false;
     HeadPose head;
     u64 applied_count = 0;
-    std::array<HeadPose, AppliedRing> applied{}; ///< by camera update, given to the game camera
+    std::array<HeadPose, AppliedRing> applied{}; ///< by drawn frame, the pose its camera was turned with
     float p00 = 0, p11 = 0;                      ///< the main view's projection as drawn
     float tan_x = 0, tan_y = 0;                  ///< the headset's widest half-angle tangents
 };
@@ -73,7 +73,19 @@ inline bool HeadForCamera(HeadPose& out, bool record) {
     return true;
 }
 
-/// The pose the camera was given `lag` camera updates before the newest one.
+inline void RecordApplied(const HeadPose& pose) {
+    State& s = Get();
+    std::scoped_lock lk{s.lock};
+    s.applied[s.applied_count++ % AppliedRing] = pose;
+}
+
+inline u64 AppliedCount() {
+    State& s = Get();
+    std::scoped_lock lk{s.lock};
+    return s.applied_count;
+}
+
+/// The pose the camera was given `lag` recorded frames before the newest one.
 inline bool AppliedPose(u64 lag, HeadPose& out) {
     State& s = Get();
     std::scoped_lock lk{s.lock};

@@ -90,18 +90,19 @@ def main():
     ap.add_argument("--hold", type=float, default=0, help="seconds with the real head pose before the test turns")
     ap.add_argument("--sweep", type=float, default=0, help="slow turn: degrees per shot from -60 to 60")
     ap.add_argument("--fake-tan", default="1.842,1.330", help="headset FOV tangents without a headset")
+    ap.add_argument("--play", action="store_true", help="load the save, then leave the game open: no shots, no test turns")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     log_dir = os.path.join(os.path.dirname(a.exe), "user", "log")
     env = dict(os.environ, EDEN_NX2_DEBUG_SERVER=PORT, EDEN_NX2_OOT_VR="1",
                EDEN_NX2_OOT_VR_XR="1" if a.headset else "0", EDEN_NX2_OOT_VR_VIEWS=a.views)
-    if not a.headset:
+    if not a.headset and a.fake_tan:
         env["EDEN_NX2_OOT_VR_FAKE_TAN"] = a.fake_tan
     env.pop("EDEN_NX2_OOT_VR_FAKE_YAW", None)
     env.pop("EDEN_NX2_OOT_VR_FAKE_PITCH", None)
     config = os.path.join(os.path.dirname(a.exe), "user", "config", "qt-config.ini")
-    original = unmap_pads(config)
-    step("starting the emulator (its controller unmapped until the test ends)")
+    original = open(config, encoding="utf-8").read() if a.play else unmap_pads(config)
+    step("starting the emulator" if a.play else "starting the emulator (its controller unmapped until the test ends)")
     proc = subprocess.Popen([a.exe, "-g", a.game], env=env)
     try:
         for _ in range(120):
@@ -133,6 +134,13 @@ def main():
         if base is None:
             raise RuntimeError("no 'set-view hook live' line in the log: the VR patch did not run")
         step(f"main at {base:#x}")
+        first, t0 = presents(), time.time()
+        time.sleep(5)
+        step(f"frame rate: {(presents() - first) / (time.time() - t0):.1f} presents per second")
+        if a.play:
+            step("PLAY NOW: close the game window when you are done")
+            proc.wait()
+            return
         call("screenshot", out=os.path.join(a.out, "vr_0_head_pose.png"))
         step("shot with the real head pose (or none without a headset)")
         if a.hold > 0:
