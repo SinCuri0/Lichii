@@ -18,10 +18,15 @@ The game is Ocarina of Time 1.1.1, program id `0400486024DEC000`, `main` build i
 
 ## How the recomp and Ghidra feed the Lichii mod
 
-1. **Ghidra finds the code.** Ghidra opens the game's `main` module (NSO) with Adubbz's Ghidra-Switch-Loader. Use it to
-   find functions, structure offsets and callers. The recomp docs expect Ghidra 12.1.2 with JDK 21 in
-   `D:\Games\Emulators\recomp\toolchain\ghidra\`. On 2026-11-13 that folder does not exist, and no Ghidra install was
-   found on this PC.
+1. **Ghidra finds the code.** Ghidra 12.1.4 runs headless (no window) in WSL Ubuntu on this PC:
+   `/opt/ghidra_12.1.4_PUBLIC`, with OpenJDK 21. The project is `/home/alexander/ghidra-oot/oot.gpr`. It holds
+   `main.elf`, the game's `main` module as an ELF file, loaded at `0x7000000000` (so `0x700033a410` is `main+0x33a410`).
+   How `main.elf` was made from the NSO is not known; no tool in the recomp repo writes it.
+   Run a script from Windows:
+   `wsl -d Ubuntu -- bash /mnt/d/Games/Emulators/recomp/tools/ghidra/analyze.sh --script DecompileAt.java <out.txt> <address>...`.
+   The scripts are in `recomp\tools\ghidra\scripts\`: `DecompileAt`, `DisasmRange`, `RefsTo`, `FindConst32`,
+   `HashCallers`, `SeadVtables`, `CameraStrings`, `StringsMatching`. Their output files come from the game: write them
+   to `recomp\build\ghidra\` (ignored by git), not to a tracked folder.
 2. **The recomp tests the idea fast.** The recomp turns the game's ARM code into C, so a hook is a C function and a
    build. Hardware write breakpoints (DR0) in the recomp found the function that writes the displayed view
    (`main+0x33a410`). Each game fact that works goes into `D:\Games\Emulators\recomp\docs\vr-port-notes.md`, with a
