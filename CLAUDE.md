@@ -17,7 +17,9 @@ status, hooks, settings, keys and the sync rules. Game facts (addresses, offsets
   `eglantine/nx2` and `origin/oot-gather-fix`. Do the same in `D:\Games\Emulators\recomp` against `origin/main` and
   `vr/feat/vr-openxr`.
 - Commit each working step. Do not end a session with uncommitted work; make a WIP commit if needed.
-- Ask before you push. Push targets: `sincuri0` (SinCuri0/Lichii) here, `vr` (SinCuri0/Curios-recomp-VR) in the recomp.
+- Our repo is SinCuri0/Lichii (remote `sincuri0`). All our work goes there. `eglantine` and `origin` (Frizti/Fritchii)
+  are read only: fetch and merge from them, never push, never open PRs against them.
+- Ask before you push.
 - Merge upstream with `git merge`, never rebase pushed branches.
 - Never commit `mods/` or files made from the game (`room.bin`, captures, dumps).
 - When a VR fact or status changes, update `docs/nx2/oot-vr.md` in the same commit.

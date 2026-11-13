@@ -7,11 +7,15 @@ Last checked: 2026-11-13.
 
 | Local folder | Branch | Remote name | GitHub | Role |
 |---|---|---|---|---|
-| `D:\Games\Emulators\lichii repo` | `feat/oot-vr` | `eglantine` | `Eglantine-Community/Eglantine` (the same repo as `Djihads80/Eglantine`) | Upstream emulator. Fritchii and Lichii are forks of it. |
-| | | `origin` | `Frizti/Fritchii` | The emulator fork the VR branch starts from: `feat/oot-vr` is built on `origin/oot-gather-fix`. |
-| | | `sincuri0` | `SinCuri0/Lichii` | Our own fork. Push our branches here. |
-| `D:\Games\Emulators\recomp` | `feat/vr-openxr` | `origin` | `sostenesfreitas/ocarina-recomp` | The OoT recompilation. Its own development has moved to Hookshot. |
-| | | `vr` | `SinCuri0/Curios-recomp-VR` | Our recomp fork with the VR research. Push here. |
+| `D:\Games\Emulators\lichii repo` | `feat/oot-vr` | `eglantine` | `Eglantine-Community/Eglantine` (the same repo as `Djihads80/Eglantine`) | Upstream emulator. Read only. |
+| | | `origin` | `Frizti/Fritchii` | The fork `feat/oot-vr` starts from (`origin/oot-gather-fix`). Read only. |
+| | | `sincuri0` | `SinCuri0/Lichii` | **Our repo. All our work goes here.** |
+| `D:\Games\Emulators\recomp` | `feat/vr-openxr` | `origin` | `sostenesfreitas/ocarina-recomp` | The OoT recompilation; its development moved to Hookshot. Read only. |
+| | | `vr` | `SinCuri0/Curios-recomp-VR` | Our recomp fork with the VR research. |
+
+We cannot commit or push to Eglantine, Fritchii or ocarina-recomp. We only fetch and merge from them. Their push URLs
+are set to `no_push_read_only` in the local git config, so a push to them fails. `remote.pushDefault` is `sincuri0`
+here and `vr` in the recomp.
 
 The game is Ocarina of Time 1.1.1, program id `0400486024DEC000`, `main` build id
 `e0f3ccfaf50065ae4ea01eb5aeb13b1a45da3348`.
@@ -113,7 +117,7 @@ Keys while playing (Windows):
 ## Keeping in sync and not losing work
 
 - Commit at each working step. A WIP commit is better than lost work. Never leave a day's work uncommitted.
-- Push `feat/oot-vr` to `sincuri0` and `feat/vr-openxr` to `vr` after each session.
+- Push `feat/oot-vr` to `sincuri0` and `feat/vr-openxr` to `vr` after each session. Never push anywhere else.
 - Fetch all remotes at the start of each session: `git fetch --all --prune`.
 - Check how far behind we are:
   `git rev-list --left-right --count HEAD...eglantine/nx2` and `HEAD...origin/oot-gather-fix`.
