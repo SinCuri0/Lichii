@@ -735,6 +735,18 @@ void CameraSource(Core::Memory::Memory& memory, u64 main_base, u64 view_object, 
         pair_m = m, pair_head = head.pose.position, has_pair = true;
     }
     TurnView(m.data(), head, MoveScale());
+    static u32 mode2_logs = 0;
+    float link_fwd[3];
+    if (Common::OotVr::FirstPerson() && Common::OotVr::TalkCamera().load(std::memory_order_relaxed) &&
+        Common::OotVr::TalkCameraMode().load(std::memory_order_relaxed) == 2 && ++mode2_logs % 30 == 1 &&
+        LinkForward(memory, link_fwd)) {
+        float game_look[3]{dx, 0, dz};
+        Normalize(game_look);
+        LOG_INFO(Kernel_SVC, "OoT VR talk camera mode 2: link fwd {:.2f} {:.2f}, drawn look {:.2f} {:.2f} {:.2f}, game look "
+                 "{:.2f} {:.2f}, head fwd {:.2f} {:.2f} {:.2f}, second eye {}",
+                 link_fwd[0], link_fwd[2], -m[8], -m[9], -m[10], game_look[0], game_look[2], head.fwd[0], head.fwd[1],
+                 head.fwd[2], second);
+    }
     memory.WriteBlock(view_object + 0x8, m.data(), sizeof(m));
     std::array<float, 3> eye;
     for (int k = 0; k < 3; ++k) {
