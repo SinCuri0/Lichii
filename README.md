@@ -17,7 +17,7 @@ A VR mode for The Legend of Zelda: Ocarina of Time (Switch 2, program id `040048
 Built on Fritchii ([Frizti/Fritchii](https://github.com/Frizti/Fritchii), branch `oot-gather-fix`), which is a fork of [Lichii](https://github.com/zortos293/Lichii).
 
 > [!WARNING]
-> Experimental. Headset tests so far: one PlayStation VR2 test through SteamVR, in the earlier recomp version of this mod. Adult Link and story cutscenes are not tested. Videos do not show in VR yet.
+> Experimental. Headset tests so far: one PlayStation VR2 test through SteamVR, in the earlier recomp version of this mod. Adult Link and story cutscenes are not tested.
 
 ### What it does
 
@@ -26,6 +26,7 @@ Built on Fritchii ([Frizti/Fritchii](https://github.com/Frizti/Fritchii), branch
 - First person from Link's head, with his head hidden.
 - The HUD, prompts and talk box move toward the centre, so you can read them in the headset.
 - Menus and the big map show on a flat screen 1 m in front of you.
+- Videos (the title screen, the new-game intro and some story scenes) show on a flat screen. They are pre-made film clips with no 3D data.
 
 ### How to use it
 

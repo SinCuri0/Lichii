@@ -69,6 +69,8 @@ Committed:
 - First person at Link's head, with the head hidden.
 - VR HUD: the HUD, prompts, talk box and area title move toward the centre, shifted per eye so they look 1.5 m away.
 - Menus and the big map show on a flat screen 1 m away.
+- Videos show on a flat screen (seen by the owner, 2026-11-13). A frame that is not a stereo pair goes to the headset as
+  a quad layer (`SubmitFrame` in `vk_oot_vr.cpp`).
 - When the game stalls, the last picture is sent again, so the runtime does not drop to its own view.
 
 Work in progress (committed as WIP on 2026-11-13):
@@ -81,7 +83,6 @@ Work in progress (committed as WIP on 2026-11-13):
 Not done or not known:
 
 - Headset tests: one PlayStation VR2 test through SteamVR, from the recomp, before most of this work.
-- Videos on the fixed screen (the recomp detects them; see `vr-port-notes.md`, "Videos").
 - The recomp cutscene signal (the listener view) gives false cutscenes in Lichii.
 - Adult Link and story cutscenes are not tested.
 
