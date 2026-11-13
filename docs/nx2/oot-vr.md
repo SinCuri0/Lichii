@@ -69,7 +69,7 @@ Committed:
 - First person at Link's head, with the head hidden.
 - VR HUD: the HUD, prompts, talk box and area title move toward the centre, shifted per eye so they look 1.5 m away.
 - Menus and the big map show on a flat screen 1 m away.
-- The L/R item menu shows at the HUD item slot in stereo. The menu pauses the game camera (camera `+0x88` bit 0), which
+- The L/R item menu shows in the middle of the view, at HUD depth (it used to move to the HUD item slot). The menu pauses the game camera (camera `+0x88` bit 0), which
   stops the world draw and the head-pose camera update. Lichii keeps the camera running (svc 0xF8 from the HUD code)
   and turns the view at set-view while the menu is shown, so the eyes keep alternating. In the headset (owner,
   2026-11-13) the menu is in 3D, but the scene behind it is frozen and moves with the head: good enough for now. The
@@ -90,12 +90,16 @@ Not done or not known:
 
 - Headset tests: one PlayStation VR2 test through SteamVR, from the recomp, before most of this work.
 - The recomp cutscene signal (the listener view) gives false cutscenes in Lichii.
+- Talk cameras (2026-11-13, built, not tested in the headset): when a talk box is open and the game camera cuts to a
+  shot, `EDEN_NX2_OOT_VR_TALK_CAM` picks what first person does: 0 as in play, 1 third person with Link's head shown,
+  2 (default) first person facing Link's forward. The log says `OoT VR talk camera: on` / `off` and each cut. The signal
+  is in the recomp's `vr-port-notes.md`, "Talk cameras".
 - Adult Link and story cutscenes are not tested.
 
 ## Settings and keys
 
 Environment variables (read in `vk_oot_vr.cpp` and `svc_nx2_oot_vr.cpp`): `EDEN_NX2_OOT_VR`, `_XR`, `_STEREO`, `_FIRST`,
-`_EYE_SCALE`, `_EYE_FWD`, `_MOVE`, `_HUD`, `_HUD_IN`, `_TEXT`, `_MAP_Y`, `_PROMPT_Y`, `_TALK_Y`, `_MENU_DIST`,
+`_EYE_SCALE`, `_EYE_FWD`, `_TALK_CAM`, `_MOVE`, `_HUD`, `_HUD_IN`, `_TEXT`, `_MAP_Y`, `_PROMPT_Y`, `_TALK_Y`, `_MENU_DIST`,
 `_OVERSCAN`, `_LAG`, `_VIEWS`, `_SOURCE`, `_ROOM`, `_ROOM_SHOT`, `_CAPTURE`, `_UI_TRACE`, `_MENU_VIEW` (0: let the item
 menu pause the world), the debug tools `_MENU_DIFF`, `_VIEW_TRACE`, `_WATCH_VIEW` (`oot-vr-research.md`), and the test poses
 `_FAKE_YAW`, `_FAKE_PITCH`, `_FAKE_TAN`, `_FAKE_IPD`. Each has the prefix `EDEN_NX2_OOT_VR`.
@@ -114,6 +118,7 @@ Keys while playing (Windows):
 | [ / ] | Menu screen nearer / farther |
 | ' / ; | Action prompt up / down |
 | . / , | Talk box up / down |
+| / | Talk camera mode: 0 as in play, 1 third person, 2 face Link's forward |
 
 ## Build and test on this PC
 

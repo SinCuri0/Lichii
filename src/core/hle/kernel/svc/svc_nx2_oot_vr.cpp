@@ -404,8 +404,12 @@ struct UiScreen {
 };
 
 constexpr u32 ShortCutId = 0x42fefb65; ///< the L1/R1 item menu: shown while +0x1A6 is 1, not 2
+constexpr u32 TalkId = 0x2e6867e2;
+constexpr u32 MessageDemoId = 0x6b8f8fdd;
 
-constexpr std::array<UiScreen, 13> WatchedScreens{{
+std::atomic<bool> g_talk_open{}; ///< Talk_00 or MessageDemo_00 is open
+
+constexpr std::array<UiScreen, 14> WatchedScreens{{
     {0xc0a4dec4, "PlusMenu_00", true},
     {0xf5b7168b, "MenuBG_00", true},
     {0x7ecad8bd, "ImportantMenu_00", true},
@@ -415,7 +419,8 @@ constexpr std::array<UiScreen, 13> WatchedScreens{{
     {0x20d55c5a, "MenuOverlay_00", false},
     {0xc3332ad4, "MapMenu_00", false},
     {0x5c7f1c3c, "PlayerStatus_00", false},
-    {0x2e6867e2, "Talk_00", false},
+    {TalkId, "Talk_00", false},
+    {MessageDemoId, "MessageDemo_00", false},
     {0xf91df64d, "MessageDialog_00", false},
     {0x5528d3d9, "CtrlGuide_00", false},
     {ShortCutId, "ShortCut_00", false},
@@ -502,7 +507,7 @@ void UpdateMenuOpen(Core::Memory::Memory& memory, u64 main_base) {
         last.fill(-1);
         started = true;
     }
-    bool menu = false;
+    bool menu = false, talk = false;
     for (size_t w = 0; w < WatchedScreens.size(); ++w) {
         const u32 id = WatchedScreens[w].id;
         u32 index = count;
@@ -519,6 +524,7 @@ void UpdateMenuOpen(Core::Memory::Memory& memory, u64 main_base) {
         memory.ReadBlock(screens[index] + 0x1A5, state.data(), state.size());
         const int open = id == ShortCutId ? state[1] == 1 : state[1] == 2 && state[0] >= 0;
         menu |= open && WatchedScreens[w].menu;
+        talk |= open && (id == TalkId || id == MessageDemoId);
         if (open != last[w]) {
             LOG_INFO(Kernel_SVC, "OoT VR HUD: {} {} (+0x1A5 {}, +0x1A6 {})", WatchedScreens[w].name,
                      open ? "open" : "closed", state[0], state[1]);
@@ -534,6 +540,7 @@ void UpdateMenuOpen(Core::Memory::Memory& memory, u64 main_base) {
         }
     }
     g_menu_now.store(menu, std::memory_order_relaxed);
+    g_talk_open.store(talk, std::memory_order_relaxed);
     if (menu) {
         g_turned_after_menu.store(0, std::memory_order_relaxed);
     }
@@ -551,12 +558,79 @@ std::array<u8, 0x88> g_game_camera{};
 u64 g_game_camera_view = 0;
 std::atomic<u64> g_camera_updates{}; ///< camera-source hook calls for the displayed camera
 
+constexpr float CutJumpM = 1.0f;      ///< game camera eye moved this much more than Link's feet in one update
+constexpr float CutTurnCos = 0.9063f; // cos 25 degrees
+constexpr u32 CutBeforeTalk = 60;     ///< camera updates a cut may come before the talk box opens
+constexpr u32 TalkCameraHold = 30;    ///< camera updates the talk camera stays after the talk box closes
+
+// A talk camera: a talk box is open and the game's own camera cut to a shot (a jump, not the follow camera).
+void TalkCameraUpdate(Core::Memory::Memory& memory) {
+    std::array<float, 3> feet{};
+    if (const u64 link = g_link.load(std::memory_order_relaxed)) {
+        memory.ReadBlock(link + 0x31C, feet.data(), sizeof(feet));
+    }
+    std::array<float, 12> m;
+    std::array<float, 3> eye;
+    std::memcpy(m.data(), g_game_camera.data(), sizeof(m));
+    std::memcpy(eye.data(), g_game_camera.data() + 0x30, sizeof(eye));
+    float fwd[3]{-m[8], 0, -m[10]};
+    const bool flat = Normalize(fwd) > 1e-3f;
+    static std::array<float, 3> last_eye{}, last_feet{};
+    static std::array<float, 3> last_fwd{};
+    static bool has_last = false;
+    static u32 since_cut = 1000, since_talk = 1000;
+    float jump = 0, turn_cos = 1;
+    if (has_last) {
+        float eye_d = 0, feet_d = 0;
+        for (int k = 0; k < 3; ++k) {
+            eye_d += (eye[k] - last_eye[k]) * (eye[k] - last_eye[k]);
+            feet_d += (feet[k] - last_feet[k]) * (feet[k] - last_feet[k]);
+        }
+        jump = std::sqrt(eye_d) - std::sqrt(feet_d);
+        if (flat) {
+            turn_cos = fwd[0] * last_fwd[0] + fwd[2] * last_fwd[2];
+        }
+    }
+    const bool cut = has_last && (jump > CutJumpM || turn_cos < CutTurnCos);
+    last_eye = eye, last_feet = feet, has_last = true;
+    if (flat) {
+        last_fwd = {fwd[0], 0, fwd[2]};
+    }
+    since_cut = cut ? 0 : std::min(since_cut + 1, 1000u);
+    const bool talk = g_talk_open.load(std::memory_order_relaxed);
+    since_talk = talk ? 0 : std::min(since_talk + 1, 1000u);
+    if (cut && (talk || since_talk < TalkCameraHold)) {
+        LOG_INFO(Kernel_SVC, "OoT VR talk camera: cut, eye moved {:.2f} m more than Link, turned {:.0f} degrees",
+                 jump, std::acos(std::clamp(turn_cos, -1.0f, 1.0f)) / Deg);
+    }
+    auto& on = Common::OotVr::TalkCamera();
+    const bool was = on.load(std::memory_order_relaxed);
+    const bool now = was ? since_talk < TalkCameraHold : talk && since_cut < CutBeforeTalk;
+    if (now != was) {
+        on.store(now, std::memory_order_relaxed);
+        LOG_INFO(Kernel_SVC, "OoT VR talk camera: {} (mode {})", now ? "on" : "off",
+                 Common::OotVr::TalkCameraMode().load(std::memory_order_relaxed));
+    }
+}
+
+// Link's facing on the ground plane: the third column of his rotation at actor +0x328.
+bool LinkForward(Core::Memory::Memory& memory, float* fwd) {
+    const u64 link = g_link.load(std::memory_order_relaxed);
+    std::array<float, 9> rot;
+    if (!link || !memory.ReadBlock(link + 0x328, rot.data(), sizeof(rot))) {
+        return false;
+    }
+    fwd[0] = rot[2], fwd[1] = 0, fwd[2] = rot[8];
+    return Normalize(fwd) > 1e-3f;
+}
+
 void CameraSource(Core::Memory::Memory& memory, u64 main_base, u64 view_object, bool from_hook = true) {
     static std::atomic<u64> turned{}, other{};
     const bool mine = view_object != 0 && IsDisplayView(view_object);
     if (mine && from_hook) {
         memory.ReadBlock(view_object + 0x8, g_game_camera.data(), g_game_camera.size());
         g_game_camera_view = view_object;
+        TalkCameraUpdate(memory);
         g_camera_updates.fetch_add(1, std::memory_order_relaxed);
     }
     const u64 count = (mine ? turned : other).fetch_add(1, std::memory_order_relaxed) + 1;
@@ -617,6 +691,16 @@ void CameraSource(Core::Memory::Memory& memory, u64 main_base, u64 view_object, 
     std::array<float, 3> head_at;
     if (Common::OotVr::FirstPerson() && LinkHead(memory, head_at)) {
         head_at[1] += EyeUpM;
+        float fwd[3];
+        if (Common::OotVr::TalkCamera().load(std::memory_order_relaxed) &&
+            Common::OotVr::TalkCameraMode().load(std::memory_order_relaxed) == 2 && LinkForward(memory, fwd)) {
+            const std::array<float, 9> rows{-fwd[2], 0, fwd[0], 0, 1, 0, -fwd[0], 0, -fwd[2]};
+            for (int i = 0; i < 3; ++i) {
+                for (int k = 0; k < 3; ++k) {
+                    m[i * 4 + k] = rows[i * 3 + k];
+                }
+            }
+        }
         for (int i = 0; i < 3; ++i) {
             m[i * 4 + 3] = -(m[i * 4] * head_at[0] + m[i * 4 + 1] * head_at[1] + m[i * 4 + 2] * head_at[2]);
         }

@@ -74,13 +74,26 @@ inline std::atomic<bool>& FirstPersonFlag() {
     return on;
 }
 
-inline bool FirstPerson() {
-    return FirstPersonFlag().load(std::memory_order_relaxed);
-}
-
 inline float EnvFloat(const char* name, float fallback) {
     const char* const v = std::getenv(name);
     return v && *v ? static_cast<float>(std::atof(v)) : fallback;
+}
+
+/// Talk cameras: 0 as in play, 1 third person, 2 first person facing Link's forward. EDEN_NX2_OOT_VR_TALK_CAM sets the start value.
+inline std::atomic<int>& TalkCameraMode() {
+    static std::atomic<int> mode = static_cast<int>(EnvFloat("EDEN_NX2_OOT_VR_TALK_CAM", 2.0f));
+    return mode;
+}
+
+/// Set while a talk box is open and the game camera has cut to a shot.
+inline std::atomic<bool>& TalkCamera() {
+    static std::atomic<bool> on{false};
+    return on;
+}
+
+inline bool FirstPerson() {
+    return FirstPersonFlag().load(std::memory_order_relaxed) &&
+           !(TalkCamera().load(std::memory_order_relaxed) && TalkCameraMode().load(std::memory_order_relaxed) == 1);
 }
 
 /// The HUD's size (1 = as the game has it). EDEN_NX2_OOT_VR_HUD sets the start value.
