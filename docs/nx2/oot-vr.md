@@ -69,12 +69,12 @@ Committed:
 - First person at Link's head, with the head hidden.
 - VR HUD: the HUD, prompts, talk box and area title move toward the centre, shifted per eye so they look 1.5 m away.
 - Menus and the big map show on a flat screen 1 m away.
-- The L/R item menu shows in the middle of the view, at HUD depth (it used to move to the HUD item slot). The menu pauses the game camera (camera `+0x88` bit 0), which
-  stops the world draw and the head-pose camera update. Lichii keeps the camera running (svc 0xF8 from the HUD code)
-  and turns the view at set-view while the menu is shown, so the eyes keep alternating. In the headset (owner,
-  2026-11-13) the menu is in 3D, but the scene behind it is frozen and moves with the head: good enough for now. The
-  menu's blurred background (`P_CaptureBG_00`) is shown again; its dark panes stay hidden. How it was found:
-  `oot-vr-research.md`.
+- The L/R item menu shows in the middle of the view, at HUD depth (it used to move to the HUD item slot). The menu
+  pauses the game camera (camera `+0x88` bit 0), which stops the world draw and the head-pose camera update. Lichii
+  keeps the camera running (svc 0xF8 from the HUD code) and turns the view at set-view while the menu is shown, so the
+  eyes keep alternating. In the headset (owner, 2026-11-13) the menu is in 3D, but the scene behind it is frozen and
+  moves with the head: good enough for now. The menu's blurred background (`P_CaptureBG_00`) is shown; its dark panes
+  stay hidden. How it was found: `oot-vr-research.md`.
 - Videos show on a flat screen (seen by the owner, 2026-11-13). A frame that is not a stereo pair goes to the headset as
   a quad layer (`SubmitFrame` in `vk_oot_vr.cpp`).
 - When the game stalls, the last picture is sent again, so the runtime does not drop to its own view.
