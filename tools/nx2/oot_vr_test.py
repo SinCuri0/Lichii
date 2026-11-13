@@ -126,12 +126,15 @@ def main():
                     help="frame dumps (colour and depth) in 6 directions from each spot into <out>/<spot>_<face>; use --fake-tan 1,1")
     ap.add_argument("--poke", default="", help="code bytes to write after loading, e.g. 33f9250=c0035fd6 (main offset=hex)")
     ap.add_argument("--play",action="store_true", help="load the save, then leave the game open: no shots, no test turns")
+    ap.add_argument("--talk", type=float, default=0,
+                    help="seconds to run straight ahead, then a shot every 0.5 s for 12 s (talk camera test)")
+    ap.add_argument("--talk-cam", default="2", help="EDEN_NX2_OOT_VR_TALK_CAM for the run")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     log_dir = os.path.join(os.path.dirname(a.exe), "user", "log")
     env = dict(os.environ, EDEN_NX2_DEBUG_SERVER=PORT, EDEN_NX2_OOT_VR="1",
                EDEN_NX2_OOT_VR_XR="1" if a.headset else "0", EDEN_NX2_OOT_VR_VIEWS=a.views,
-               EDEN_NX2_OOT_VR_UI_TRACE="1")
+               EDEN_NX2_OOT_VR_UI_TRACE="1", EDEN_NX2_OOT_VR_TALK_CAM=a.talk_cam)
     if not a.headset and a.fake_tan:
         env["EDEN_NX2_OOT_VR_FAKE_TAN"] = a.fake_tan
     if a.hold_buttons and not a.capture:
@@ -216,6 +219,16 @@ def main():
         if a.hold > 0:
             step(f"LOOK AROUND NOW: {a.hold:.0f} s with your real head pose")
             time.sleep(a.hold)
+        if a.talk > 0:
+            set_pose(base, 1, 0.0)
+            steps = [{"left_stick": [0, 1], "frames": int(a.talk * 30)}, {"frames": 10}]
+            step(f"running straight ahead for {a.talk:.1f} s")
+            call("input_sequence", {"steps": steps}, timeout=120)
+            for n in range(24):
+                call("screenshot", out=os.path.join(a.out, f"talk_{n:02d}.png"))
+                time.sleep(0.5)
+            step("talk done: 24 shots")
+            return
         if a.run:
             set_pose(base, 1, 0.0)
             steps =[{"left_stick": [0, 1], "frames": 40}, {"left_stick": [0, 1], "buttons": ["A"], "frames": 6},

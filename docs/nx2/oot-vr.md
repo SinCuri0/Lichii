@@ -92,8 +92,9 @@ Not done or not known:
 - The recomp cutscene signal (the listener view) gives false cutscenes in Lichii.
 - Talk cameras (2026-11-13, built, not tested in the headset): when a talk box is open and the game camera cuts to a
   shot, `EDEN_NX2_OOT_VR_TALK_CAM` picks what first person does: 0 as in play, 1 third person with Link's head shown,
-  2 (default) first person facing Link's forward. The log says `OoT VR talk camera: on` / `off` and each cut. The signal
-  is in the recomp's `vr-port-notes.md`, "Talk cameras".
+  2 (default) first person facing where Link's head bone faces (talk animations turn his body without changing
+  actor `+0x328`; mode 2 seen facing the speaker in test pictures, 2026-11-13). The log says `OoT VR talk camera: on` / `off` and each
+  cut. The signal is in the recomp's `vr-port-notes.md`, "Talk cameras".
 - Adult Link and story cutscenes are not tested.
 
 ## Settings and keys
@@ -118,7 +119,7 @@ Keys while playing (Windows):
 | [ / ] | Menu screen nearer / farther |
 | ' / ; | Action prompt up / down |
 | . / , | Talk box up / down |
-| / | Talk camera mode: 0 as in play, 1 third person, 2 face Link's forward |
+| / | Talk camera mode: 0 as in play, 1 third person, 2 face where Link's head faces |
 
 ## Build and test on this PC
 
@@ -126,6 +127,7 @@ Keys while playing (Windows):
 - `tools/nx2/oot_vr_build_test.ps1 [-Headset] [-Hold 10]` builds, then runs `oot_vr_test.py` against the game.
   It calls a build `.bat` in an old Claude scratchpad folder. Replace that path when the scratchpad is gone.
 - `tools/nx2/oot_vr_test.py --sweep 5` tests head turns without a headset. `--play` runs without screenshots.
+  `--talk 3 [--talk-cam 2]` runs straight ahead for 3 s, then takes 24 pictures: for a save just before a talk.
 - `D:\Games\Emulators\oot_vr_play.ps1` and `oot_vr_room_capture.ps1` are launch scripts outside the repo.
 
 ## Keeping in sync and not losing work

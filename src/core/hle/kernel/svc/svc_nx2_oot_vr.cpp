@@ -258,6 +258,7 @@ std::mutex g_head_lock;
 std::array<float, 3> g_head{}; ///< Link's head bone in the world, metres
 std::array<float, 3> g_head_feet{}; ///< Link's feet when g_head was taken
 bool g_has_head = false;
+std::array<float, 9> g_head_axes{}; ///< Link's head bone: 3 axes of 3 floats, under g_head_lock
 
 // Link's body skeleton: actor +0x8 -> +0x70 parts -> +0xB0 body model -> +0x398.
 u64 LinkSkeleton(Core::Memory::Memory& memory, u64 link) {
@@ -341,6 +342,11 @@ void LinkSkeletonUpdate(Core::Memory::Memory& memory, u64 skeleton) {
         }
         g_head_feet = feet;
         g_has_head = true;
+        for (int c = 0; c < 3; ++c) {
+            for (int k = 0; k < 3; ++k) {
+                g_head_axes[c * 3 + k] = head[c * 4 + k];
+            }
+        }
     }
     if (CaptureMode()) {
         static bool logged = false;
@@ -381,8 +387,14 @@ bool LinkHead(Core::Memory::Memory& memory, std::array<float, 3>& head) {
     const float above = g_head[1] - g_head_feet[1];
     stand = std::fmax(above, stand - StandFollowM);
     const float forward = forward_m + std::fmin((stand - above) * LowForwardPerM, MaxLowForwardM);
+    float dir[3]{rot[2], rot[5], rot[8]};
+    float head_dir[3]{g_head_axes[3], 0, g_head_axes[5]};
+    if (Common::OotVr::TalkCamera().load(std::memory_order_relaxed) &&
+        Common::OotVr::TalkCameraMode().load(std::memory_order_relaxed) == 2 && Normalize(head_dir) > 0.3f) {
+        dir[0] = head_dir[0], dir[1] = 0, dir[2] = head_dir[2];
+    }
     for (int k = 0; k < 3; ++k) {
-        head[k] = g_head[k] - g_head_feet[k] + feet[k] + rot[2 + 3 * k] * forward;
+        head[k] = g_head[k] - g_head_feet[k] + feet[k] + dir[k] * forward;
     }
     return g_has_head;
 }
@@ -563,8 +575,6 @@ constexpr float CutTurnCos = 0.9063f; // cos 25 degrees
 constexpr u32 CutBeforeTalk = 60;     ///< camera updates a cut may come before the talk box opens
 constexpr u32 TalkCameraHold = 30;    ///< camera updates the talk camera stays after the talk box closes
 
-bool LinkForward(Core::Memory::Memory& memory, float* fwd);
-
 // A talk camera: a talk box is open and the game's own camera cut to a shot (a jump, not the follow camera).
 void TalkCameraUpdate(Core::Memory::Memory& memory) {
     std::array<float, 3> feet{};
@@ -594,17 +604,6 @@ void TalkCameraUpdate(Core::Memory::Memory& memory) {
         }
     }
     const bool cut = has_last && (jump > CutJumpM || turn_cos < CutTurnCos);
-    static u32 check_count = 0;
-    float link_fwd[3], move[3]{feet[0] - last_feet[0], 0, feet[2] - last_feet[2]};
-    if (has_last && ++check_count % 60 == 0 && Normalize(move) > 1e-3f && LinkForward(memory, link_fwd)) {
-        std::array<float, 3> at;
-        std::memcpy(at.data(), g_game_camera.data() + 0x3C, sizeof(at));
-        float look[3]{at[0] - eye[0], at[1] - eye[1], at[2] - eye[2]};
-        Normalize(look);
-        LOG_INFO(Kernel_SVC, "OoT VR facing check: move.linkfwd {:.2f}, look.linkfwd {:.2f}, look.row3 {:.2f}",
-                 move[0] * link_fwd[0] + move[2] * link_fwd[2], look[0] * link_fwd[0] + look[2] * link_fwd[2],
-                 look[0] * m[8] + look[1] * m[9] + look[2] * m[10]);
-    }
     last_eye = eye, last_feet = feet, has_last = true;
     if (flat) {
         last_fwd = {fwd[0], 0, fwd[2]};
@@ -635,6 +634,15 @@ bool LinkForward(Core::Memory::Memory& memory, float* fwd) {
     }
     fwd[0] = rot[2], fwd[1] = 0, fwd[2] = rot[8];
     return Normalize(fwd) > 1e-3f;
+}
+
+// Link's head bone, second axis, flat: talk animations turn his body but not actor +0x328.
+bool LinkHeadForward(Core::Memory::Memory& memory, float* fwd) {
+    {
+        std::scoped_lock lk{g_head_lock};
+        fwd[0] = g_head_axes[3], fwd[1] = 0, fwd[2] = g_head_axes[5];
+    }
+    return Normalize(fwd) > 0.3f || LinkForward(memory, fwd);
 }
 
 void CameraSource(Core::Memory::Memory& memory, u64 main_base, u64 view_object, bool from_hook = true) {
@@ -706,19 +714,8 @@ void CameraSource(Core::Memory::Memory& memory, u64 main_base, u64 view_object, 
         head_at[1] += EyeUpM;
         float fwd[3];
         if (Common::OotVr::TalkCamera().load(std::memory_order_relaxed) &&
-            Common::OotVr::TalkCameraMode().load(std::memory_order_relaxed) == 2 && LinkForward(memory, fwd)) {
-            const float* r0 = &m[0];
-            const float* r1 = &m[4];
-            const float* r2 = &m[8];
-            const float look_sign = r2[0] * dx + r2[1] * dy + r2[2] * dz >= 0 ? 1.0f : -1.0f;
-            const float up_sign = r1[1] >= 0 ? 1.0f : -1.0f;
-            const float c0 = r1[1] * r2[2] - r1[2] * r2[1], c1 = r1[2] * r2[0] - r1[0] * r2[2],
-                        c2 = r1[0] * r2[1] - r1[1] * r2[0];
-            const float side_sign = r0[0] * c0 + r0[1] * c1 + r0[2] * c2 >= 0 ? 1.0f : -1.0f;
-            const float b0 = look_sign * fwd[0], b2 = look_sign * fwd[2];
-            const std::array<float, 9> rows{side_sign * up_sign * b2, 0, -side_sign * up_sign * b0,
-                                            0, up_sign, 0,
-                                            b0, 0, b2};
+            Common::OotVr::TalkCameraMode().load(std::memory_order_relaxed) == 2 && LinkHeadForward(memory, fwd)) {
+            const std::array<float, 9> rows{-fwd[2], 0, fwd[0], 0, 1, 0, -fwd[0], 0, -fwd[2]};
             for (int i = 0; i < 3; ++i) {
                 for (int k = 0; k < 3; ++k) {
                     m[i * 4 + k] = rows[i * 3 + k];
@@ -735,18 +732,6 @@ void CameraSource(Core::Memory::Memory& memory, u64 main_base, u64 view_object, 
         pair_m = m, pair_head = head.pose.position, has_pair = true;
     }
     TurnView(m.data(), head, MoveScale());
-    static u32 mode2_logs = 0;
-    float link_fwd[3];
-    if (Common::OotVr::FirstPerson() && Common::OotVr::TalkCamera().load(std::memory_order_relaxed) &&
-        Common::OotVr::TalkCameraMode().load(std::memory_order_relaxed) == 2 && ++mode2_logs % 30 == 1 &&
-        LinkForward(memory, link_fwd)) {
-        float game_look[3]{dx, 0, dz};
-        Normalize(game_look);
-        LOG_INFO(Kernel_SVC, "OoT VR talk camera mode 2: link fwd {:.2f} {:.2f}, drawn look {:.2f} {:.2f} {:.2f}, game look "
-                 "{:.2f} {:.2f}, head fwd {:.2f} {:.2f} {:.2f}, second eye {}",
-                 link_fwd[0], link_fwd[2], -m[8], -m[9], -m[10], game_look[0], game_look[2], head.fwd[0], head.fwd[1],
-                 head.fwd[2], second);
-    }
     memory.WriteBlock(view_object + 0x8, m.data(), sizeof(m));
     std::array<float, 3> eye;
     for (int k = 0; k < 3; ++k) {
