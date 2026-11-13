@@ -7,7 +7,7 @@ The `AGENTS.md` sections "Live debug server", "Builds" and the `C:/lx` paths des
 
 ## OoT VR
 
-Current work is the Ocarina of Time VR mod on branch `feat/oot-vr`. Read `docs/nx2/oot-vr.md` first: repositories,
+Current work is the Ocarina of Time VR mod on branch `oot-vr-mod`. Read `docs/nx2/oot-vr.md` first: repositories,
 status, hooks, settings, keys and the sync rules. Game facts (addresses, offsets, units) come from the recomp in
 `D:\Games\Emulators\recomp` and its `docs/vr-port-notes.md`. Find and write a fact there before you port it here.
 

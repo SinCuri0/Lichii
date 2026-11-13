@@ -7,8 +7,8 @@ Last checked: 2026-11-13.
 
 | Local folder | Branch | Remote name | GitHub | Role |
 |---|---|---|---|---|
-| `D:\Games\Emulators\lichii repo` | `feat/oot-vr` | `eglantine` | `Eglantine-Community/Eglantine` (the same repo as `Djihads80/Eglantine`) | Upstream emulator. Read only. |
-| | | `origin` | `Frizti/Fritchii` | The fork `feat/oot-vr` starts from (`origin/oot-gather-fix`). Read only. |
+| `D:\Games\Emulators\lichii repo` | `oot-vr-mod` | `eglantine` | `Eglantine-Community/Eglantine` (the same repo as `Djihads80/Eglantine`) | Upstream emulator. Read only. |
+| | | `origin` | `Frizti/Fritchii` | The fork `oot-vr-mod` starts from (`origin/oot-gather-fix`). Read only. |
 | | | `zortos` | `zortos293/Lichii` | The repo SinCuri0/Lichii is forked from on GitHub. Our PRs to upstream Lichii go here, against `nx2`. Read only. |
 | | | `sincuri0` | `SinCuri0/Lichii` | **Our repo. All our work goes here.** |
 | `D:\Games\Emulators\recomp` | `feat/vr-openxr` | `origin` | `sostenesfreitas/ocarina-recomp` | The OoT recompilation; its development moved to Hookshot. Read only. |
@@ -58,7 +58,7 @@ view object.
 
 ## Status
 
-From the commits on `feat/oot-vr` (2026-11-12) and the code. I have not run these myself.
+From the commits on `oot-vr-mod` (2026-11-12) and the code. I have not run these myself.
 
 Committed:
 
@@ -118,7 +118,7 @@ Keys while playing (Windows):
 ## Keeping in sync and not losing work
 
 - Commit at each working step. A WIP commit is better than lost work. Never leave a day's work uncommitted.
-- Push `feat/oot-vr` to `sincuri0` and `feat/vr-openxr` to `vr` after each session. Never push anywhere else.
+- Push `oot-vr-mod` to `sincuri0` and `feat/vr-openxr` to `vr` after each session. Never push anywhere else.
 - Fetch all remotes at the start of each session: `git fetch --all --prune`.
 - Check how far behind we are:
   `git rev-list --left-right --count HEAD...eglantine/nx2` and `HEAD...origin/oot-gather-fix`.
