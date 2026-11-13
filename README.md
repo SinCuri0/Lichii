@@ -10,6 +10,50 @@
   <img src="dist/branding/lichii_icon_with_logo.png" alt="Lichii" width="600">
 </p>
 
+# Lichii OoT VR Mod
+
+A VR mode for The Legend of Zelda: Ocarina of Time (Switch 2, program id `0400486024DEC000`), built into Lichii.
+
+Built on Fritchii ([Frizti/Fritchii](https://github.com/Frizti/Fritchii), branch `oot-gather-fix`), which is a fork of [Lichii](https://github.com/zortos293/Lichii).
+
+> [!WARNING]
+> Experimental. Headset tests so far: one PlayStation VR2 test through SteamVR, in the earlier recomp version of this mod. Adult Link and story cutscenes are not tested. Videos do not show in VR yet.
+
+### What it does
+
+- Your head turns the game camera, in a headset through OpenXR.
+- 3D: one picture for each eye.
+- First person from Link's head, with his head hidden.
+- The HUD, prompts and talk box move toward the centre, so you can read them in the headset.
+- Menus and the big map show on a flat screen 1 m in front of you.
+
+### How to use it
+
+1. Install an OpenXR runtime, for example SteamVR, and connect the headset.
+2. Set `EDEN_NX2_OOT_VR=1`, then start `lichii.exe`. In a Command Prompt:
+   ```bat
+   set EDEN_NX2_OOT_VR=1
+   lichii.exe
+   ```
+3. Start Ocarina of Time.
+
+Headset, 3D and first person are on by default. Turn one off with `EDEN_NX2_OOT_VR_XR=0`, `EDEN_NX2_OOT_VR_STEREO=0` or `EDEN_NX2_OOT_VR_FIRST=0`.
+
+Keys while playing:
+
+| Key | Does |
+|---|---|
+| 5 | Set "straight ahead" to where your head points now |
+| 1 / 2 | HUD smaller / bigger |
+| 3 / 4 | HUD out to the edges / in to the centre |
+| 8 / 9 | Talk box and cutscene text smaller / bigger |
+| - / = | Eye distance smaller / bigger (less / more 3D) |
+| [ / ] | Menu screen nearer / farther |
+
+All settings, keys and how the mod works: [docs/nx2/oot-vr.md](docs/nx2/oot-vr.md).
+
+---
+
 # Lichii
 
 Lichii is an experimental, open-source Nintendo Switch and Switch 2 emulator written in C++. It builds on Eglantine, Eden, yuzu and Sudachi, preserving their contributions while developing this fork's game compatibility and renderer fixes.
