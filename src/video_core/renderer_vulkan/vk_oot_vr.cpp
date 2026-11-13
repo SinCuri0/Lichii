@@ -820,14 +820,13 @@ VkImage BeginFrameInner(const Device& device, std::mutex& queue_lock, u32 width,
         }
         place_keys[k] = down;
     }
-    // Key /: talk camera mode 0 as in play, 1 third person, 2 face Link's forward.
+    // Key /: first person or third person.
     static bool key_slash = false;
     const bool key_slash_now = GetAsyncKeyState(0xBF) & 0x8000;
     if (key_slash_now && !key_slash) {
-        std::atomic<int>& mode = Common::OotVr::TalkCameraMode();
-        mode.store((mode.load() + 1) % 3);
-        constexpr std::array<const char*, 3> names{"as in play", "third person", "face Link's forward"};
-        LOG_INFO(Render_Vulkan, "OoT VR: talk camera mode {}: {}", mode.load(), names[mode.load()]);
+        std::atomic<bool>& first = Common::OotVr::FirstPersonFlag();
+        first.store(!first.load());
+        LOG_INFO(Render_Vulkan, "OoT VR: {}", first.load() ? "first person" : "third person");
     }
     key_slash = key_slash_now;
     // Key 5: head zero to where the head is now.

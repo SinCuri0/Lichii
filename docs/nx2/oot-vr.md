@@ -90,11 +90,11 @@ Not done or not known:
 
 - Headset tests: one PlayStation VR2 test through SteamVR, from the recomp, before most of this work.
 - The recomp cutscene signal (the listener view) gives false cutscenes in Lichii.
-- Talk cameras (2026-11-13, built, not tested in the headset): when a talk box is open and the game camera cuts to a
-  shot, `EDEN_NX2_OOT_VR_TALK_CAM` picks what first person does: 0 as in play, 1 third person with Link's head shown,
-  2 (default) first person facing where Link's head bone faces (talk animations turn his body without changing
-  actor `+0x328`; mode 2 seen facing the speaker in test pictures, 2026-11-13). The log says `OoT VR talk camera: on` / `off` and each
-  cut. The signal is in the recomp's `vr-port-notes.md`, "Talk cameras".
+- Talk cameras (2026-11-13, not tested in the headset): when a talk box is open and the game camera cuts to a shot,
+  `EDEN_NX2_OOT_VR_TALK_CAM=2` (default) makes first person face where Link's head bone faces (talk animations turn
+  his body without changing actor `+0x328`), and sets the near plane to 0.1 m in first and third person (talk shots
+  use about 1 m, which cut off the floor). `0` leaves talks as in play. The log says `OoT VR talk camera: on` / `off`
+  and each cut. The signal is in the recomp's `vr-port-notes.md`, "Talk cameras".
 - Adult Link and story cutscenes are not tested.
 
 ## Settings and keys
@@ -119,7 +119,7 @@ Keys while playing (Windows):
 | [ / ] | Menu screen nearer / farther |
 | ' / ; | Action prompt up / down |
 | . / , | Talk box up / down |
-| / | Talk camera mode: 0 as in play, 1 third person, 2 face where Link's head faces |
+| / | First person / third person |
 
 ## Build and test on this PC
 

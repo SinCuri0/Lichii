@@ -79,7 +79,7 @@ inline float EnvFloat(const char* name, float fallback) {
     return v && *v ? static_cast<float>(std::atof(v)) : fallback;
 }
 
-/// Talk cameras: 0 as in play, 1 third person, 2 first person facing Link's forward. EDEN_NX2_OOT_VR_TALK_CAM sets the start value.
+/// Talk cameras: 0 as in play, 2 first person faces where Link's head faces and the near plane is 0.1 m. EDEN_NX2_OOT_VR_TALK_CAM.
 inline std::atomic<int>& TalkCameraMode() {
     static std::atomic<int> mode = static_cast<int>(EnvFloat("EDEN_NX2_OOT_VR_TALK_CAM", 2.0f));
     return mode;
@@ -92,8 +92,7 @@ inline std::atomic<bool>& TalkCamera() {
 }
 
 inline bool FirstPerson() {
-    return FirstPersonFlag().load(std::memory_order_relaxed) &&
-           !(TalkCamera().load(std::memory_order_relaxed) && TalkCameraMode().load(std::memory_order_relaxed) == 1);
+    return FirstPersonFlag().load(std::memory_order_relaxed);
 }
 
 /// The HUD's size (1 = as the game has it). EDEN_NX2_OOT_VR_HUD sets the start value.

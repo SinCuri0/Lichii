@@ -574,6 +574,25 @@ constexpr float CutJumpM = 1.0f;      ///< game camera eye moved this much more 
 constexpr float CutTurnCos = 0.9063f; // cos 25 degrees
 constexpr u32 CutBeforeTalk = 60;     ///< camera updates a cut may come before the talk box opens
 constexpr u32 TalkCameraHold = 30;    ///< camera updates the talk camera stays after the talk box closes
+constexpr float TalkNearM = 0.1f;     ///< near plane in play (projection +0x98); talk shots use about 1 m
+
+// Row-major 4x4 projection: P[10] = -(f+n)/(f-n), P[11] = -2fn/(f-n). Keeps the far plane.
+void SetNearPlane(u8* matrix, float near_m) {
+    float p10, p11;
+    std::memcpy(&p10, matrix + 40, 4);
+    std::memcpy(&p11, matrix + 44, 4);
+    if (p10 + 1.0f >= 0.0f || p11 >= 0.0f) {
+        return;
+    }
+    const float far_m = p11 / (p10 + 1.0f);
+    if (2.0f * far_m * near_m / (far_m - near_m) >= -p11) {
+        return;
+    }
+    p10 = -(far_m + near_m) / (far_m - near_m);
+    p11 = -2.0f * far_m * near_m / (far_m - near_m);
+    std::memcpy(matrix + 40, &p10, 4);
+    std::memcpy(matrix + 44, &p11, 4);
+}
 
 // A talk camera: a talk box is open and the game's own camera cut to a shot (a jump, not the follow camera).
 void TalkCameraUpdate(Core::Memory::Memory& memory) {
@@ -1201,10 +1220,19 @@ bool CallNx2OotVr(Core::System& system, u32 imm, std::span<u64, 8> args) {
                     std::memcpy(object.data() + matrix + 20, &p11, 4);
                     if (CaptureMode()) {
                         std::memcpy(object.data() + matrix + 40, CaptureDepthRow.data(), sizeof(CaptureDepthRow));
+                    } else if (Common::OotVr::TalkCamera().load(std::memory_order_relaxed) &&
+                               Common::OotVr::TalkCameraMode().load(std::memory_order_relaxed) != 0) {
+                        SetNearPlane(object.data() + matrix, TalkNearM);
                     }
                 }
                 const auto fov = WideFields(tan_x, tan_y);
                 std::memcpy(object.data() + 0xA0, fov.data(), sizeof(fov));
+                float near_m;
+                std::memcpy(&near_m, object.data() + 0x98, 4);
+                if (!CaptureMode() && Common::OotVr::TalkCamera().load(std::memory_order_relaxed) &&
+                    Common::OotVr::TalkCameraMode().load(std::memory_order_relaxed) != 0 && near_m > TalkNearM) {
+                    std::memcpy(object.data() + 0x98, &TalkNearM, 4);
+                }
                 memory.WriteBlock(main_base + ProjectionCopyOffset, object.data(), object.size());
                 // Talk cameras narrow the game's own projection after the camera update; the clouds read it.
                 memory.WriteBlock(args[3], object.data(), object.size());
