@@ -92,8 +92,8 @@ Not done or not known:
 - The recomp cutscene signal (the listener view) gives false cutscenes in Lichii.
 - Talk cameras (2026-11-13, not tested in the headset): when a talk box is open and the game camera cuts to a shot,
   `EDEN_NX2_OOT_VR_TALK_CAM=2` (default) makes first person face where Link's head bone faces (talk animations turn
-  his body without changing actor `+0x328`), and sets the near plane to 0.1 m in first and third person (talk shots
-  use about 1 m, which cut off the floor). `0` leaves talks as in play. The log says `OoT VR talk camera: on` / `off`
+  his body without changing actor `+0x328`), and sets the near plane to 0.1 m in first person and 0.02 m in third
+  person (talk shots use about 1 m, which cut off the floor; some shots put the camera almost on the floor). `0` leaves talks as in play. The log says `OoT VR talk camera: on` / `off`
   and each cut. The signal is in the recomp's `vr-port-notes.md`, "Talk cameras".
 - Adult Link and story cutscenes are not tested.
 
