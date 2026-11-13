@@ -18,6 +18,13 @@ sys.path.insert(0, HERE)
 import debug_mcp  # noqa: E402
 PORT = "127.0.0.1:6546"
 TEST_POSE_OFFSET = 0x4E9FFF0
+# Name, yaw (positive is left) and pitch (positive is up) of each cube face.
+CAPTURE_FACES = (("front", 0.0, 0.0), ("left", 90.0, 0.0), ("back", 180.0, 0.0), ("right", -90.0, 0.0),
+                 ("up", 0.0, 89.0), ("down", 0.0, -89.0))
+# Name and head position (metres: x right, y up, z back) of each capture spot.
+CAPTURE_RADIUS = 0.25
+CAPTURE_SPOTS = (("centre", 0.0, 0.0, 0.0), ("right", CAPTURE_RADIUS, 0.0, 0.0), ("front", 0.0, 0.0, -CAPTURE_RADIUS),
+                 ("left", -CAPTURE_RADIUS, 0.0, 0.0), ("back", 0.0, 0.0, CAPTURE_RADIUS))
 
 
 def call(method, params=None, out=None, timeout=300):
@@ -60,11 +67,31 @@ def in_game(log_dir):
 
 
 def set_pose(base, mode, yaw=0.0, pitch=0.0):
-    data = struct.pack("<Iff", mode, yaw, pitch).hex()
+    write_test_pose(base, struct.pack("<Iff", mode, yaw, pitch))
+
+
+def set_position(base, x, y, z):
+    """Test head position in metres; later set_pose calls keep it."""
+    write_test_pose(base, struct.pack("<Ifff", 3, x, y, z))
+
+
+def write_test_pose(base, packed):
+    data = packed.hex()
     # debug_mcp.py's tool list has no write_memory; the server has it.
     emulator = debug_mcp.Emulator(PORT)
     try:
         emulator.call("write_memory", {"address": hex(base + TEST_POSE_OFFSET), "hex": data}, 30)
+    finally:
+        emulator.close()
+
+
+def read_hud_params(base):
+    emulator = debug_mcp.Emulator(PORT)
+    try:
+        r = emulator.call("read_memory", {"address": hex(base + 0x4E9F800), "size": 0x80, "as": "hex"}, 30)
+        h = r["hex"] if isinstance(r, dict) and "hex" in r else r.get("data")
+        raw = bytes.fromhex(h)
+        return struct.unpack("<8f", raw[:32]), struct.unpack("<I", raw[32:36])[0], struct.unpack("<8f", raw[0x30:0x50])
     finally:
         emulator.close()
 
@@ -90,17 +117,29 @@ def main():
     ap.add_argument("--views", default="1", help="EDEN_NX2_OOT_VR_VIEWS: bit n turns view n")
     ap.add_argument("--hold", type=float, default=0, help="seconds with the real head pose before the test turns")
     ap.add_argument("--sweep", type=float, default=0, help="slow turn: degrees per shot from -60 to 60")
+    ap.add_argument("--pitch", type=float, default=0, help="degrees up during the sweep")
     ap.add_argument("--fake-tan", default="1.842,1.330", help="headset FOV tangents without a headset")
     ap.add_argument("--run", action="store_true", help="run forward and roll, with shots during it")
     ap.add_argument("--menu", default="", help="buttons to press after loading, e.g. Plus,R,Plus, with a shot after each")
+    ap.add_argument("--hold-buttons", default="", help="buttons to hold for 3 s each after loading, e.g. L,R, with a shot during each")
+    ap.add_argument("--capture", action="store_true",
+                    help="frame dumps (colour and depth) in 6 directions from each spot into <out>/<spot>_<face>; use --fake-tan 1,1")
     ap.add_argument("--play",action="store_true", help="load the save, then leave the game open: no shots, no test turns")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     log_dir = os.path.join(os.path.dirname(a.exe), "user", "log")
     env = dict(os.environ, EDEN_NX2_DEBUG_SERVER=PORT, EDEN_NX2_OOT_VR="1",
-               EDEN_NX2_OOT_VR_XR="1" if a.headset else "0", EDEN_NX2_OOT_VR_VIEWS=a.views)
+               EDEN_NX2_OOT_VR_XR="1" if a.headset else "0", EDEN_NX2_OOT_VR_VIEWS=a.views,
+               EDEN_NX2_OOT_VR_UI_TRACE="1")
     if not a.headset and a.fake_tan:
         env["EDEN_NX2_OOT_VR_FAKE_TAN"] = a.fake_tan
+    if a.hold_buttons and not a.capture:
+        os.makedirs(os.path.join(a.out, "dumps"), exist_ok=True)
+        env.update(EDEN_NX2_FRAME_DUMP=os.path.join(a.out, "dumps"), EDEN_NX2_FRAME_DUMP_AT="file",
+                   EDEN_NX2_FRAME_DUMP_FINAL="1")
+    if a.capture:
+        env.update(EDEN_NX2_FRAME_DUMP=os.path.join(a.out, "dumps"), EDEN_NX2_FRAME_DUMP_AT="file",
+                   EDEN_NX2_FRAME_DUMP_CAP_MIB="16384", EDEN_NX2_OOT_VR_CAPTURE="1", EDEN_NX2_FRAME_DUMP_FINAL="1")
     env.pop("EDEN_NX2_OOT_VR_FAKE_YAW", None)
     env.pop("EDEN_NX2_OOT_VR_FAKE_PITCH", None)
     config = os.path.join(os.path.dirname(a.exe), "user", "config", "qt-config.ini")
@@ -151,6 +190,22 @@ def main():
             step("PLAY NOW: close the game window when you are done")
             proc.wait()
             return
+        if a.capture:
+            for spot, x, y, z in CAPTURE_SPOTS:
+                set_position(base, x, y, z)
+                wait_frames(5)
+                for name, yaw, pitch in CAPTURE_FACES:
+                    set_pose(base, 1, yaw, pitch)
+                    wait_frames(20)
+                    result = call("capture_frame", {"timeout_s": 300, "manifest_lines": 0}, timeout=400)
+                    face = os.path.join(a.out, f"{spot}_{name}")
+                    shutil.rmtree(face, ignore_errors=True)
+                    shutil.move(result["directory"], face)
+                    step(f"captured {spot} {name}: {face}")
+            set_position(base, 0.0, 0.0, 0.0)
+            set_pose(base, 1, 0.0)
+            step("capture done")
+            return
         call("screenshot", out=os.path.join(a.out, "vr_0_head_pose.png"))
         step("shot with the real head pose (or none without a headset)")
         if a.hold > 0:
@@ -167,22 +222,41 @@ def main():
                 call("screenshot", out=os.path.join(a.out, f"run_{n:02d}.png"))
             runner.wait(timeout=60)
             step("run done: 10 shots")
+        for button in filter(None, a.hold_buttons.split(",")):
+            steps = [{"buttons": [button], "frames": 600}, {"frames": 60}]
+            holder = subprocess.Popen([sys.executable, "-I", os.path.join(HERE, "debug_mcp.py"), "--server", PORT,
+                                       "--call", json.dumps({"method": "input_sequence", "params": {"steps": steps}})])
+            # The debug server answers one request at a time, so a screenshot would wait for the hold to end: use a frame dump.
+            time.sleep(3)
+            open(os.path.join(a.out, "dumps", "capture.now"), "w").close()
+            step(f"held {button}: frame dump requested")
+            time.sleep(4)
+            holder.wait(timeout=60)
+            time.sleep(2)
+        def sweep(prefix):
+            steps = int(120 / a.sweep)
+            for n in range(steps + 1):
+                yaw = -60.0 + n * a.sweep
+                set_pose(base, 1, yaw, a.pitch)
+                wait_frames(6)
+                call("screenshot", out=os.path.join(a.out, f"{prefix}{n:02d}_{yaw:+04.0f}.png"))
+            set_pose(base, 1, 0.0)
+            step(f"sweep done: {steps + 1} shots")
+
         if a.menu:
+            if a.sweep > 0:
+                sweep("before_")
             for n, button in enumerate(a.menu.split(",")):
                 press(button, 90)
                 time.sleep(3)
                 call("screenshot", out=os.path.join(a.out, f"menu_{n}_{button}.png"))
                 step(f"menu: pressed {button}")
+            if a.sweep > 0:
+                sweep("after_")
             step("menu done")
             return
         if a.sweep > 0:
-            steps = int(120 / a.sweep)
-            for n in range(steps + 1):
-                yaw = -60.0 + n * a.sweep
-                set_pose(base, 1, yaw)
-                wait_frames(6)
-                call("screenshot", out=os.path.join(a.out, f"sweep_{n:02d}_{yaw:+04.0f}.png"))
-            step(f"sweep done: {steps + 1} shots")
+            sweep("sweep_")
         for name, mode, yaw in (("1_straight", 1, 0.0), ("2_left60", 1, 60.0), ("3_straight", 1, 0.0),
                                 ("4_right60", 1, -60.0), ("5_straight", 1, 0.0), ("6_off", 2, 0.0)):
             set_pose(base, mode, yaw)

@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <array>
 #include <mutex>
 #include <set>
 #include <string>
@@ -33,6 +34,25 @@ void AddDeviceExtensions(std::set<std::string, std::less<>>& extensions,
 /// `queue_lock` guards the graphics queue the runtime may use.
 VkImage BeginFrame(const Device& device, std::mutex& queue_lock, u32 width, u32 height,
                    VkFormat format, bool& copy);
+
+/// After a BeginFrame that returned an image: a headset image the caller clears to black in the
+/// same submit, in COLOR_ATTACHMENT_OPTIMAL at the end (VK_NULL_HANDLE: none).
+VkImage BlackImageToClear();
+
+/// The room backdrop behind 2D screens: one image per eye and the matrix it is drawn with.
+struct RoomEyes {
+    std::array<VkImage, 2> images{};
+    std::array<std::array<float, 16>, 2> view_projection{}; ///< column-major, room metres to clip
+    VkFormat format = VK_FORMAT_UNDEFINED;
+    u32 size = 0; ///< width and height of each image
+};
+
+/// A room backdrop is loaded: screens show it behind them instead of black.
+void EnableRoom();
+
+/// After a BeginFrame that returned an image, on a 2D screen: the eye images to draw the room into in
+/// the same submit, in COLOR_ATTACHMENT_OPTIMAL at the end (false: none this present).
+bool RoomToDraw(RoomEyes& eyes);
 
 /// Ends the frame BeginFrame started, after the copy was submitted.
 void EndFrame(std::mutex& queue_lock, bool drawn);

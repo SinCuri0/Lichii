@@ -9,7 +9,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <string>
 #include <thread>
+
+#include <fmt/format.h>
 
 #include "common/logging.h"
 #include "common/oot_vr.h"
@@ -29,12 +32,16 @@ namespace {
 
 constexpr float ScreenDistanceM = 2.0f;
 constexpr float ScreenWidthM = 3.2f;
+// The black image behind the screen before the world view: pixels, and metres from the head.
+constexpr u32 BlackSize = 16;
+constexpr float BlackDistanceM = 20.0f;
+// Pixels across each eye's room backdrop image, and its far plane in metres.
+constexpr u32 RoomSize = 2048;
+constexpr float RoomFarM = 200.0f;
 // Menu screen width per metre of distance: about 50 degrees across.
 using Common::OotVr::MenuWidthPerM;
 // Presents the menu screen stays after a menu closes: the frames drawn while it was open have no head pose.
 constexpr int MenuHoldPresents = 8;
-constexpr s64 KeepAliveAfterNs = 60'000'000;
-constexpr s64 KeepAliveForNs = 3'000'000'000;
 // Camera updates between the one a picture was drawn with and the present that sends it.
 constexpr u64 DefaultLag = 1;
 
@@ -53,6 +60,19 @@ struct Xr {
     XrSpace space = XR_NULL_HANDLE;
     XrSpace head = XR_NULL_HANDLE;
     std::array<Chain, 4> chains{}; ///< two sets of a left and a right eye: index set * 2 + eye
+    XrSwapchain black = XR_NULL_HANDLE;
+    VkImage black_image = VK_NULL_HANDLE;
+    int black_state = 0; ///< 0 none, 1 to clear, 2 cleared in this frame's submit, 3 ready
+    bool room_enabled = false;
+    std::array<XrSwapchain, 2> room{};
+    std::array<std::array<XrSwapchainImageVulkanKHR, 8>, 2> room_images{};
+    std::array<u32, 2> room_index{};
+    VkFormat room_format = VK_FORMAT_UNDEFINED;
+    int room_state = 0; ///< 0 none, 1 images acquired in this frame, 2 drawn in this frame's submit
+    bool room_ready = false;
+    std::array<XrView, 2> room_views{};
+    RoomEyes room_eyes;
+    XrVector3f origin{}; ///< head zero in the LOCAL space
     int draw = 0;                  ///< the chain this present draws into
     int pair_shown = -1;               ///< the set whose two eyes are a finished pair, -1 none
     int pending = -1;              ///< the set with a new left eye that waits for its right eye
@@ -60,7 +80,8 @@ struct Xr {
     VkFormat source_format = VK_FORMAT_UNDEFINED;
     bool copy = false;
     std::vector<int64_t> formats;
-    bool running = false, in_frame = false, shown = false;
+    std::atomic<bool> running = false;
+    bool in_frame = false, shown = false;
     XrFrameState frame_state{XR_TYPE_FRAME_STATE};
     std::array<XrVector3f, 2> eye{};
     std::array<XrFovf, 2> eye_fov{};
@@ -69,12 +90,16 @@ struct Xr {
     bool has_sent = false;
     Common::OotVr::HeadPose head_now; ///< the newest head pose from head zero
     bool menu_shown = false;
-    std::mutex frame_mutex;                     ///< held from BeginFrame to EndFrame and by KeepAlive
-    std::unique_lock<std::mutex> frame_hold;    ///< the game thread's hold on frame_mutex
-    std::atomic<s64> last_submit_ns{};
-    std::atomic<s64> last_game_frame_ns{};
+    std::mutex mutex; ///< guards what the headset thread reads: chains, pair and screen, poses, menu, room
+    std::atomic<XrTime> display_time{0}; ///< the headset thread's newest predicted display time
+    int screen = 0; ///< the chain whose last released image a screen frame shows
+    int menu_hold = 0;
+    bool menu = false;
+    Common::OotVr::HeadPose next_sent; ///< the pose of the frame the game thread is copying
+    bool next_has_sent = false;
+    std::array<XrView, 2> next_room_views{};
     XrPosef menu_pose{{0, 0, 0, 1}, {0, 0, -ScreenDistanceM}};
-    bool recenter = false; ///< head zero to the next head pose
+    std::atomic<bool> recenter = false; ///< head zero to the next head pose
     std::string instance_extensions, device_extensions;
     PFN_xrGetVulkanInstanceExtensionsKHR get_instance_extensions = nullptr;
     PFN_xrGetVulkanDeviceExtensionsKHR get_device_extensions = nullptr;
@@ -83,6 +108,11 @@ struct Xr {
 };
 
 Xr X;
+
+s64 SteadyNs() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
 
 bool Ok(XrResult result, const char* what) {
     if (XR_SUCCEEDED(result)) {
@@ -280,9 +310,135 @@ bool MakeSwapchain(VkFormat source, u32 width, u32 height) {
         }
     }
     X.width = width, X.height = height, X.source_format = source;
+    if (!X.black) {
+        info.createFlags = XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT;
+        info.width = info.height = BlackSize;
+        std::array<XrSwapchainImageVulkanKHR, 4> images{};
+        images.fill({XR_TYPE_SWAPCHAIN_IMAGE_VULKAN_KHR});
+        u32 count = 0, index = 0;
+        XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+        wait.timeout = XR_INFINITE_DURATION;
+        if (Ok(xrCreateSwapchain(X.session, &info, &X.black), "xrCreateSwapchain (black)") &&
+            Ok(xrEnumerateSwapchainImages(X.black, static_cast<u32>(images.size()), &count,
+                                          reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data())),
+               "xrEnumerateSwapchainImages (black)") &&
+            Ok(xrAcquireSwapchainImage(X.black, nullptr, &index), "xrAcquireSwapchainImage (black)") &&
+            Ok(xrWaitSwapchainImage(X.black, &wait), "xrWaitSwapchainImage (black)")) {
+            X.black_image = images[index].image;
+            X.black_state = 1;
+        }
+    }
     LOG_INFO(Render_Vulkan, "OoT VR: headset swapchains {}x{}, format {}, {} images, {}", width,
              height, format, X.chains[0].image_count, X.copy ? "copied as it is" : "blit");
     return true;
+}
+
+XrVector3f Rotate(const XrQuaternionf& o, const XrVector3f& v) {
+    const XrVector3f a{o.y * v.z - o.z * v.y, o.z * v.x - o.x * v.z, o.x * v.y - o.y * v.x};
+    const XrVector3f b{o.y * a.z - o.z * a.y, o.z * a.x - o.x * a.z, o.x * a.y - o.y * a.x};
+    return {v.x + 2 * (o.w * a.x + b.x), v.y + 2 * (o.w * a.y + b.y), v.z + 2 * (o.w * a.z + b.z)};
+}
+
+bool MakeRoomSwapchains() {
+    int64_t format = 0;
+    for (const VkFormat f : {VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_B8G8R8A8_SRGB}) {
+        if (format == 0 && std::ranges::find(X.formats, static_cast<int64_t>(f)) != X.formats.end()) {
+            format = f;
+        }
+    }
+    XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+    info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
+    info.format = format;
+    info.sampleCount = 1;
+    info.width = info.height = RoomSize;
+    info.faceCount = info.arraySize = info.mipCount = 1;
+    for (size_t i = 0; i < 2 && format != 0; ++i) {
+        X.room_images[i].fill({XR_TYPE_SWAPCHAIN_IMAGE_VULKAN_KHR});
+        u32 count = 0;
+        if (!Ok(xrCreateSwapchain(X.session, &info, &X.room[i]), "xrCreateSwapchain (room)") ||
+            !Ok(xrEnumerateSwapchainImages(X.room[i], static_cast<u32>(X.room_images[i].size()), &count,
+                                           reinterpret_cast<XrSwapchainImageBaseHeader*>(X.room_images[i].data())),
+                "xrEnumerateSwapchainImages (room)")) {
+            format = 0;
+        }
+    }
+    if (format == 0) {
+        LOG_WARNING(Render_Vulkan, "OoT VR: no room backdrop images: the headset offers no sRGB format, or they failed");
+        X.room_enabled = false;
+        return false;
+    }
+    X.room_format = static_cast<VkFormat>(format);
+    LOG_INFO(Render_Vulkan, "OoT VR: room backdrop swapchains {}x{}, format {}", RoomSize, RoomSize, format);
+    return true;
+}
+
+std::array<float, 16> RoomViewProjection(const XrView& view, const XrVector3f& origin) {
+    const float l = std::tan(view.fov.angleLeft), r = std::tan(view.fov.angleRight);
+    const float u = std::tan(view.fov.angleUp), d = std::tan(view.fov.angleDown);
+    constexpr float n = 0.05f, f = RoomFarM;
+    std::array<float, 16> p{};
+    p[0] = 2 / (r - l), p[8] = (r + l) / (r - l);
+    p[5] = 2 / (d - u), p[9] = (u + d) / (d - u);
+    p[10] = -f / (f - n), p[14] = -f * n / (f - n), p[11] = -1;
+    const XrQuaternionf& q = view.pose.orientation;
+    const std::array<XrVector3f, 3> axes{Rotate(q, {1, 0, 0}), Rotate(q, {0, 1, 0}), Rotate(q, {0, 0, 1})};
+    const XrVector3f at{view.pose.position.x - origin.x, view.pose.position.y - origin.y,
+                        view.pose.position.z - origin.z};
+    std::array<float, 16> v{};
+    for (int i = 0; i < 3; ++i) {
+        const XrVector3f& a = axes[i];
+        v[0 * 4 + i] = a.x, v[1 * 4 + i] = a.y, v[2 * 4 + i] = a.z;
+        v[3 * 4 + i] = -(a.x * at.x + a.y * at.y + a.z * at.z);
+    }
+    v[15] = 1;
+    std::array<float, 16> out{};
+    for (int col = 0; col < 4; ++col) {
+        for (int row = 0; row < 4; ++row) {
+            for (int k = 0; k < 4; ++k) {
+                out[col * 4 + row] += p[k * 4 + row] * v[col * 4 + k];
+            }
+        }
+    }
+    return out;
+}
+
+void AcquireRoom(std::mutex& queue_lock) {
+    if (!X.room[0] && !MakeRoomSwapchains()) {
+        return;
+    }
+    XrViewLocateInfo info{XR_TYPE_VIEW_LOCATE_INFO};
+    info.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    info.displayTime = X.display_time.load();
+    info.space = X.space;
+    XrViewState state{XR_TYPE_VIEW_STATE};
+    std::array<XrView, 2> views{{{XR_TYPE_VIEW}, {XR_TYPE_VIEW}}};
+    u32 count = 0;
+    if (!XR_SUCCEEDED(xrLocateViews(X.session, &info, &state, 2, &count, views.data())) || count != 2 ||
+        !(state.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT)) {
+        return;
+    }
+    XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+    wait.timeout = XR_INFINITE_DURATION;
+    for (size_t i = 0; i < 2; ++i) {
+        bool acquired;
+        {
+            std::scoped_lock lock{queue_lock};
+            acquired = Ok(xrAcquireSwapchainImage(X.room[i], nullptr, &X.room_index[i]), "xrAcquireSwapchainImage (room)");
+        }
+        if (!acquired || !Ok(xrWaitSwapchainImage(X.room[i], &wait), "xrWaitSwapchainImage (room)")) {
+            LOG_WARNING(Render_Vulkan, "OoT VR: room backdrop off: its images failed");
+            X.room_enabled = false;
+            return;
+        }
+    }
+    X.next_room_views = views;
+    for (size_t i = 0; i < 2; ++i) {
+        X.room_eyes.images[i] = X.room_images[i][X.room_index[i]].image;
+        X.room_eyes.view_projection[i] = RoomViewProjection(views[i], X.origin);
+    }
+    X.room_eyes.format = X.room_format;
+    X.room_eyes.size = RoomSize;
+    X.room_state = 1;
 }
 
 void PollEvents() {
@@ -309,27 +465,16 @@ void PollEvents() {
     }
 }
 
-XrVector3f Rotate(const XrQuaternionf& o, const XrVector3f& v) {
-    const XrVector3f a{o.y * v.z - o.z * v.y, o.z * v.x - o.x * v.z, o.x * v.y - o.y * v.x};
-    const XrVector3f b{o.y * a.z - o.z * a.y, o.z * a.x - o.x * a.z, o.x * a.y - o.y * a.x};
-    return {v.x + 2 * (o.w * a.x + b.x), v.y + 2 * (o.w * a.y + b.y), v.z + 2 * (o.w * a.z + b.z)};
-}
-
-void SubmitFrame(bool with_picture) {
+// The headset thread, with X.mutex and the queue held: one frame of the newest finished pictures.
+void SubmitFrame(bool should_render) {
     const XrRect2Di rect{{0, 0}, {static_cast<int32_t>(X.width), static_cast<int32_t>(X.height)}};
     XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
     quad.space = X.space;
     quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
-    quad.subImage = {X.chains[X.draw].swapchain, rect, 0};
+    quad.subImage = {X.chains[X.screen].swapchain, rect, 0};
     quad.pose = {{0, 0, 0, 1}, {0, 0, -ScreenDistanceM}};
     quad.size = {ScreenWidthM, X.width ? ScreenWidthM * static_cast<float>(X.height) / X.width : 1.0f};
-    static int menu_hold = 0;
-    if (Common::OotVr::MenuOpen().load(std::memory_order_relaxed)) {
-        menu_hold = MenuHoldPresents;
-    } else if (with_picture && menu_hold > 0) {
-        --menu_hold;
-    }
-    const bool menu = menu_hold > 0;
+    const bool menu = X.menu;
     if (menu && !X.menu_shown) {
         const auto& h = X.head_now;
         const XrVector3f f = Rotate({h.orientation[0], h.orientation[1], h.orientation[2], h.orientation[3]}, {0, 0, -1});
@@ -354,7 +499,7 @@ void SubmitFrame(bool with_picture) {
     const bool has_projection = Common::OotVr::GameProjection(p00, p11);
     const bool in_world = X.has_sent && has_projection && !menu;
     static int last_world = -1;
-    if (with_picture && last_world != static_cast<int>(in_world)) {
+    if (X.shown && last_world != static_cast<int>(in_world)) {
         last_world = in_world;
         LOG_INFO(Render_Vulkan, "OoT VR: now {} (head pose from the camera {}, game projection {} {:.3f} {:.3f})",
                  in_world ? "the world around the head" : "a screen", X.has_sent ? "yes" : "no",
@@ -363,7 +508,7 @@ void SubmitFrame(bool with_picture) {
     if (in_world) {
         const float ax = std::atan(1.0f / p00), ay = std::atan(1.0f / p11);
         for (int i = 0; i < 2; ++i) {
-            const Chain& c = X.chains[X.pair_shown >= 0 ? X.pair_shown * 2 + i : X.draw];
+            const Chain& c = X.chains[X.pair_shown >= 0 ? X.pair_shown * 2 + i : X.screen];
             const auto& q = c.pose.orientation;
             const XrQuaternionf o{q[0], q[1], q[2], q[3]};
             std::array<float, 3> at;
@@ -378,25 +523,39 @@ void SubmitFrame(bool with_picture) {
             views[i].subImage = {c.swapchain, rect, 0};
         }
     }
-    const XrCompositionLayerBaseHeader* layer =
-        in_world ? reinterpret_cast<const XrCompositionLayerBaseHeader*>(&world)
-                 : reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
+    XrCompositionLayerQuad back{XR_TYPE_COMPOSITION_LAYER_QUAD};
+    back.space = X.head;
+    back.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+    back.subImage = {X.black, {{0, 0}, {static_cast<int32_t>(BlackSize), static_cast<int32_t>(BlackSize)}}, 0};
+    back.pose = {{0, 0, 0, 1}, {0, 0, -BlackDistanceM}};
+    back.size = {BlackDistanceM * 10, BlackDistanceM * 10};
+    std::array<XrCompositionLayerProjectionView, 2> room_views{};
+    XrCompositionLayerProjection room{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    room.space = X.space;
+    room.viewCount = 2;
+    room.views = room_views.data();
+    for (size_t i = 0; i < 2; ++i) {
+        room_views[i] = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+        room_views[i].pose = X.room_views[i].pose;
+        room_views[i].fov = X.room_views[i].fov;
+        room_views[i].subImage = {X.room[i], {{0, 0}, {static_cast<int32_t>(RoomSize), static_cast<int32_t>(RoomSize)}}, 0};
+    }
+    std::array<const XrCompositionLayerBaseHeader*, 2> layers{};
+    u32 layer_count = 0;
+    if (!in_world && !menu && X.room_ready) {
+        layers[layer_count++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&room);
+    } else if (!in_world && !menu && X.black_state == 3) {
+        layers[layer_count++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&back);
+    }
+    layers[layer_count++] = in_world ? reinterpret_cast<const XrCompositionLayerBaseHeader*>(&world)
+                                     : reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
     XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};
     end.displayTime = X.frame_state.predictedDisplayTime;
     end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
-    end.layerCount = with_picture ? 1 : 0;
-    end.layers = with_picture ? &layer : nullptr;
-    const bool ended = Ok(xrEndFrame(X.session, &end), "xrEndFrame");
-    if (ended && with_picture) {
-        X.last_submit_ns.store(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                   std::chrono::steady_clock::now().time_since_epoch())
-                                   .count());
-    }
-    if (ended && with_picture && !X.shown) {
-        X.shown = true;
-        LOG_INFO(Render_Vulkan, "OoT VR: the first picture went to the headset ({}x{}, {})", X.width,
-                 X.height, in_world ? "the world around the head" : "a screen");
-    }
+    const bool picture = should_render && X.shown;
+    end.layerCount = picture ? layer_count : 0;
+    end.layers = picture ? layers.data() : nullptr;
+    Ok(xrEndFrame(X.session, &end), "xrEndFrame");
 }
 
 } // Anonymous namespace
@@ -457,41 +616,105 @@ namespace {
 
 void EndFrameInner(std::mutex& queue_lock, bool drawn);
 
-s64 NowNs() {
-    return std::chrono::duration_cast<std::chrono::nanoseconds>(
-               std::chrono::steady_clock::now().time_since_epoch())
-        .count();
+void LocateHead() {
+    XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
+    constexpr XrSpaceLocationFlags both =
+        XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT;
+    if (XR_SUCCEEDED(xrLocateSpace(X.head, X.space, X.frame_state.predictedDisplayTime, &location)) &&
+        (location.locationFlags & both) == both) {
+        static bool has_origin = false;
+        XrVector3f& origin = X.origin;
+        const XrPosef& p = location.pose;
+        if (!has_origin || X.recenter.exchange(false)) {
+            origin = p.position, has_origin = true;
+            LOG_INFO(Render_Vulkan, "OoT VR: head zero at {:.2f} {:.2f} {:.2f} m", origin.x,
+                     origin.y, origin.z);
+        }
+        Common::OotVr::HeadPose pose;
+        pose.orientation = {p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w};
+        pose.position = {p.position.x - origin.x, p.position.y - origin.y, p.position.z - origin.z};
+        static u64 located = 0;
+        if (located++ % 900 == 0) {
+            LOG_INFO(Render_Vulkan, "OoT VR: head {:.3f} {:.3f} {:.3f} m from head zero", pose.position[0],
+                     pose.position[1], pose.position[2]);
+        }
+        Common::OotVr::SetHead(pose);
+        X.head_now = pose;
+    }
+    XrViewLocateInfo view_info{XR_TYPE_VIEW_LOCATE_INFO};
+    view_info.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    view_info.displayTime = X.frame_state.predictedDisplayTime;
+    view_info.space = X.head;
+    XrViewState view_state{XR_TYPE_VIEW_STATE};
+    std::array<XrView, 2> views{{{XR_TYPE_VIEW}, {XR_TYPE_VIEW}}};
+    u32 view_count = 0;
+    if (XR_SUCCEEDED(xrLocateViews(X.session, &view_info, &view_state, 2, &view_count, views.data())) &&
+        view_count == 2 && (view_state.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT)) {
+        X.eye = {views[0].pose.position, views[1].pose.position};
+        Common::OotVr::SetEyes({{{X.eye[0].x, X.eye[0].y, X.eye[0].z}, {X.eye[1].x, X.eye[1].y, X.eye[1].z}}});
+        X.eye_fov = {views[0].fov, views[1].fov};
+        float tan_x = 0, tan_y = 0;
+        for (const XrView& v : views) {
+            tan_x = std::max({tan_x, std::abs(std::tan(v.fov.angleLeft)), std::abs(std::tan(v.fov.angleRight))});
+            tan_y = std::max({tan_y, std::abs(std::tan(v.fov.angleUp)), std::abs(std::tan(v.fov.angleDown))});
+        }
+        // EDEN_NX2_OOT_VR_OVERSCAN: extra picture past the headset's edges, as a fraction (default 0.15).
+        static const float overscan = [] {
+            const char* const v = std::getenv("EDEN_NX2_OOT_VR_OVERSCAN");
+            return 1.0f + (v && *v ? std::strtof(v, nullptr) : 0.15f);
+        }();
+        Common::OotVr::SetHeadsetTan(tan_x * overscan, tan_y * overscan);
+        if (!X.has_eyes) {
+            X.has_eyes = true;
+            LOG_INFO(Render_Vulkan, "OoT VR: left eye view {:.1f} to {:.1f} degrees across",
+                     views[0].fov.angleLeft / 0.0174533f, views[0].fov.angleRight / 0.0174533f);
+        }
+    }
 }
 
-// Runtimes drop to their own view without frames: resend the last picture during game stalls.
-void KeepAlive(std::mutex* queue_lock) {
-    u64 resent = 0;
-    for (;;) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        if (X.state < 0) {
-            return;
+// The headset's own frame loop: a frame for every headset refresh, with the newest pictures the game finished.
+void FrameLoop(std::mutex* queue_lock) {
+    s64 last_end = 0;
+    u64 frames = 0;
+    while (X.state > 0) {
+        {
+            std::scoped_lock lock{X.mutex};
+            PollEvents();
         }
-        const s64 now = NowNs();
-        if (!X.shown || now - X.last_submit_ns.load() < KeepAliveAfterNs ||
-            now - X.last_game_frame_ns.load() > KeepAliveForNs) {
-            continue;
-        }
-        std::unique_lock hold{X.frame_mutex, std::try_to_lock};
-        if (!hold.owns_lock() || !X.running || X.in_frame) {
+        if (!X.running) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
             continue;
         }
         XrFrameState state{XR_TYPE_FRAME_STATE};
-        if (!Ok(xrWaitFrame(X.session, nullptr, &state), "xrWaitFrame (repeat)")) {
+        const s64 wait_start = SteadyNs();
+        if (!Ok(xrWaitFrame(X.session, nullptr, &state), "xrWaitFrame")) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
             continue;
         }
-        X.frame_state = state;
-        std::scoped_lock lock{*queue_lock};
-        if (!Ok(xrBeginFrame(X.session, nullptr), "xrBeginFrame (repeat)")) {
-            continue;
+        const s64 waited = SteadyNs() - wait_start;
+        X.display_time.store(state.predictedDisplayTime);
+        {
+            std::scoped_lock lock{X.mutex};
+            X.frame_state = state;
+            LocateHead();
         }
+        {
+            std::scoped_lock lock{*queue_lock};
+            if (!Ok(xrBeginFrame(X.session, nullptr), "xrBeginFrame")) {
+                continue;
+            }
+        }
+        std::scoped_lock lock{X.mutex, *queue_lock};
         SubmitFrame(state.shouldRender != XR_FALSE);
-        if (resent++ % 60 == 0) {
-            LOG_INFO(Render_Vulkan, "OoT VR: the game drew no frame, last picture sent again ({} times)", resent);
+        const s64 now = SteadyNs();
+        if (last_end != 0 && now - last_end > 3 * state.predictedDisplayPeriod) {
+            LOG_WARNING(Render_Vulkan, "OoT VR: {:.1f} ms between headset frames (xrWaitFrame {:.1f} ms, period {:.1f} ms)",
+                        (now - last_end) / 1e6, waited / 1e6, state.predictedDisplayPeriod / 1e6);
+        }
+        last_end = now;
+        if (frames++ % 1200 == 0) {
+            LOG_INFO(Render_Vulkan, "OoT VR: {} headset frames, period {:.1f} ms", frames,
+                     state.predictedDisplayPeriod / 1e6);
         }
     }
 }
@@ -504,11 +727,13 @@ VkImage BeginFrameInner(const Device& device, std::mutex& queue_lock, u32 width,
     if (X.in_frame) {
         EndFrameInner(queue_lock, false);
     }
-    if (!X.session && !CreateSession(device)) {
-        Off();
-        return VK_NULL_HANDLE;
+    if (!X.session) {
+        if (!CreateSession(device)) {
+            Off();
+            return VK_NULL_HANDLE;
+        }
+        std::thread(FrameLoop, &queue_lock).detach();
     }
-    PollEvents();
     if (!X.running) {
         return VK_NULL_HANDLE;
     }
@@ -598,100 +823,39 @@ VkImage BeginFrameInner(const Device& device, std::mutex& queue_lock, u32 width,
     // Key 5: head zero to where the head is now.
     static bool key5 = false;
     const bool key5_now = GetAsyncKeyState('5') & 0x8000;
-    const bool recenter = key5_now && !key5;
+    if (key5_now && !key5) {
+        X.recenter = true;
+    }
     key5 = key5_now;
-#else
-    constexpr bool recenter = false;
 #endif
-    X.has_sent = Common::OotVr::AppliedPose(lag, X.sent);
+    X.next_has_sent = Common::OotVr::AppliedPose(lag, X.next_sent);
     static u64 presents = 0, first_applied = 0;
     if (presents++ % 300 == 0) {
         const u64 applied = Common::OotVr::AppliedCount();
         LOG_INFO(Render_Vulkan, "OoT VR: {} drawn-frame poses in the last 300 presents", applied - first_applied);
         first_applied = applied;
     }
-    X.frame_state = {XR_TYPE_FRAME_STATE};
-    if (!Ok(xrWaitFrame(X.session, nullptr, &X.frame_state), "xrWaitFrame")) {
-        return VK_NULL_HANDLE;
-    }
-    XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
-    constexpr XrSpaceLocationFlags both =
-        XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT;
-    if (XR_SUCCEEDED(xrLocateSpace(X.head, X.space, X.frame_state.predictedDisplayTime, &location)) &&
-        (location.locationFlags & both) == both) {
-        static XrVector3f origin;
-        static bool has_origin = false;
-        const XrPosef& p = location.pose;
-        if (!has_origin || recenter || X.recenter) {
-            origin = p.position, has_origin = true, X.recenter = false;
-            LOG_INFO(Render_Vulkan, "OoT VR: head zero at {:.2f} {:.2f} {:.2f} m", origin.x,
-                     origin.y, origin.z);
-        }
-        Common::OotVr::HeadPose pose;
-        pose.orientation = {p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w};
-        pose.position = {p.position.x - origin.x, p.position.y - origin.y, p.position.z - origin.z};
-        static u64 located = 0;
-        if (located++ % 90 == 0) {
-            LOG_INFO(Render_Vulkan, "OoT VR: head {:.3f} {:.3f} {:.3f} m from head zero", pose.position[0],
-                     pose.position[1], pose.position[2]);
-        }
-        Common::OotVr::SetHead(pose);
-        X.head_now = pose;
-    }
-    XrViewLocateInfo view_info{XR_TYPE_VIEW_LOCATE_INFO};
-    view_info.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
-    view_info.displayTime = X.frame_state.predictedDisplayTime;
-    view_info.space = X.head;
-    XrViewState view_state{XR_TYPE_VIEW_STATE};
-    std::array<XrView, 2> views{{{XR_TYPE_VIEW}, {XR_TYPE_VIEW}}};
-    u32 view_count = 0;
-    if (XR_SUCCEEDED(xrLocateViews(X.session, &view_info, &view_state, 2, &view_count, views.data())) &&
-        view_count == 2 && (view_state.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT)) {
-        X.eye = {views[0].pose.position, views[1].pose.position};
-        Common::OotVr::SetEyes({{{X.eye[0].x, X.eye[0].y, X.eye[0].z}, {X.eye[1].x, X.eye[1].y, X.eye[1].z}}});
-        X.eye_fov = {views[0].fov, views[1].fov};
-        float tan_x = 0, tan_y = 0;
-        for (const XrView& v : views) {
-            tan_x = std::max({tan_x, std::abs(std::tan(v.fov.angleLeft)), std::abs(std::tan(v.fov.angleRight))});
-            tan_y = std::max({tan_y, std::abs(std::tan(v.fov.angleUp)), std::abs(std::tan(v.fov.angleDown))});
-        }
-        // EDEN_NX2_OOT_VR_OVERSCAN: extra picture past the headset's edges, as a fraction (default 0.15).
-        static const float overscan = [] {
-            const char* const v = std::getenv("EDEN_NX2_OOT_VR_OVERSCAN");
-            return 1.0f + (v && *v ? std::strtof(v, nullptr) : 0.15f);
-        }();
-        Common::OotVr::SetHeadsetTan(tan_x * overscan, tan_y * overscan);
-        if (!X.has_eyes) {
-            X.has_eyes = true;
-            LOG_INFO(Render_Vulkan, "OoT VR: left eye view {:.1f} to {:.1f} degrees across",
-                     views[0].fov.angleLeft / 0.0174533f, views[0].fov.angleRight / 0.0174533f);
+    {
+        std::scoped_lock lock{X.mutex, queue_lock};
+        const bool fits = X.chains[0].swapchain && X.width == width && X.height == height &&
+                          X.source_format == format;
+        const int eye = X.next_has_sent ? X.next_sent.eye : -1;
+        const int set = eye == 1 && X.pending >= 0 ? X.pending : (X.pair_shown == 0 ? 1 : 0);
+        X.draw = set * 2 + (eye == 1 ? 1 : 0);
+        if (!(fits || MakeSwapchain(format, width, height)) ||
+            !Ok(xrAcquireSwapchainImage(X.chains[X.draw].swapchain, nullptr, &X.index), "xrAcquireSwapchainImage")) {
+            return VK_NULL_HANDLE;
         }
     }
-    std::unique_lock lock{queue_lock};
-    if (!Ok(xrBeginFrame(X.session, nullptr), "xrBeginFrame")) {
-        return VK_NULL_HANDLE;
-    }
-    if (!X.frame_state.shouldRender) {
-        SubmitFrame(false);
-        return VK_NULL_HANDLE;
-    }
-    const bool fits = X.chains[0].swapchain && X.width == width && X.height == height &&
-                      X.source_format == format;
-    const int eye = X.has_sent ? X.sent.eye : -1;
-    const int set = eye == 1 && X.pending >= 0 ? X.pending : (X.pair_shown == 0 ? 1 : 0);
-    X.draw = set * 2 + (eye == 1 ? 1 : 0);
-    if (!(fits || MakeSwapchain(format, width, height)) ||
-        !Ok(xrAcquireSwapchainImage(X.chains[X.draw].swapchain, nullptr, &X.index), "xrAcquireSwapchainImage")) {
-        SubmitFrame(false);
-        return VK_NULL_HANDLE;
-    }
-    lock.unlock();
     XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
     wait.timeout = XR_INFINITE_DURATION;
     if (!Ok(xrWaitSwapchainImage(X.chains[X.draw].swapchain, &wait), "xrWaitSwapchainImage")) {
-        lock.lock();
-        SubmitFrame(false);
         return VK_NULL_HANDLE;
+    }
+    float room_p00 = 0, room_p11 = 0;
+    if (X.room_enabled && !(X.next_has_sent && Common::OotVr::GameProjection(room_p00, room_p11)) &&
+        !Common::OotVr::MenuOpen().load(std::memory_order_relaxed)) {
+        AcquireRoom(queue_lock);
     }
     X.in_frame = true;
     copy = X.copy;
@@ -703,47 +867,91 @@ void EndFrameInner(std::mutex& queue_lock, bool drawn) {
         return;
     }
     X.in_frame = false;
-    std::scoped_lock lock{queue_lock};
-    Chain& c = X.chains[X.draw];
-    const bool released = Ok(xrReleaseSwapchainImage(c.swapchain, nullptr), "xrReleaseSwapchainImage");
-    if (released && drawn) {
-        c.pose = X.has_sent ? X.sent : Common::OotVr::HeadPose{};
-        const int set = X.draw / 2;
-        if (c.pose.eye == 0) {
-            X.pending = set;
-        } else if (c.pose.eye == 1 && X.pending == set) {
-            X.pair_shown = set, X.pending = -1;
-        } else if (c.pose.eye < 0) {
-            X.pair_shown = -1, X.pending = -1;
+    bool released, black_ready = false, room_released = true;
+    {
+        std::scoped_lock lock{queue_lock};
+        released = Ok(xrReleaseSwapchainImage(X.chains[X.draw].swapchain, nullptr), "xrReleaseSwapchainImage");
+        if (X.black_state == 2) {
+            black_ready = Ok(xrReleaseSwapchainImage(X.black, nullptr), "xrReleaseSwapchainImage (black)");
+        }
+        if (X.room_state > 0) {
+            for (const XrSwapchain room : X.room) {
+                room_released &= Ok(xrReleaseSwapchainImage(room, nullptr), "xrReleaseSwapchainImage (room)");
+            }
         }
     }
-    SubmitFrame(released && drawn);
+    std::scoped_lock lock{X.mutex};
+    if (black_ready) {
+        X.black_state = 3;
+        LOG_INFO(Render_Vulkan, "OoT VR: black background ready");
+    }
+    if (X.room_state > 0) {
+        const bool ready = room_released && X.room_state == 2;
+        if (ready && !X.room_ready) {
+            LOG_INFO(Render_Vulkan, "OoT VR: room backdrop shown behind screens");
+        }
+        X.room_ready = ready;
+        X.room_views = X.next_room_views;
+        X.room_state = 0;
+    }
+    if (!released || !drawn) {
+        return;
+    }
+    Chain& c = X.chains[X.draw];
+    c.pose = X.next_has_sent ? X.next_sent : Common::OotVr::HeadPose{};
+    X.sent = X.next_sent;
+    X.has_sent = X.next_has_sent;
+    X.screen = X.draw;
+    const int set = X.draw / 2;
+    if (c.pose.eye == 0) {
+        X.pending = set;
+    } else if (c.pose.eye == 1 && X.pending == set) {
+        X.pair_shown = set, X.pending = -1;
+    } else if (c.pose.eye < 0) {
+        X.pair_shown = -1, X.pending = -1;
+    }
+    if (Common::OotVr::MenuOpen().load(std::memory_order_relaxed)) {
+        X.menu_hold = MenuHoldPresents;
+    } else if (X.menu_hold > 0) {
+        --X.menu_hold;
+    }
+    X.menu = X.menu_hold > 0;
+    if (!X.shown) {
+        X.shown = true;
+        LOG_INFO(Render_Vulkan, "OoT VR: the first picture is ready for the headset ({}x{})", X.width, X.height);
+    }
 }
 
 } // Anonymous namespace
 
 VkImage BeginFrame(const Device& device, std::mutex& queue_lock, u32 width, u32 height,
                    VkFormat format, bool& copy) {
-    X.last_game_frame_ns.store(NowNs());
-    if (!X.frame_hold.owns_lock()) {
-        X.frame_hold = std::unique_lock{X.frame_mutex};
+    return BeginFrameInner(device, queue_lock, width, height, format, copy);
+}
+
+VkImage BlackImageToClear() {
+    if (X.black_state != 1 || !X.in_frame) {
+        return VK_NULL_HANDLE;
     }
-    const VkImage image = BeginFrameInner(device, queue_lock, width, height, format, copy);
-    if (image == VK_NULL_HANDLE) {
-        X.frame_hold.unlock();
+    X.black_state = 2;
+    return X.black_image;
+}
+
+void EnableRoom() {
+    X.room_enabled = true;
+}
+
+bool RoomToDraw(RoomEyes& eyes) {
+    if (X.room_state != 1 || !X.in_frame) {
+        return false;
     }
-    if (X.running) {
-        static std::once_flag started;
-        std::call_once(started, [&queue_lock] { std::thread(KeepAlive, &queue_lock).detach(); });
-    }
-    return image;
+    X.room_state = 2;
+    eyes = X.room_eyes;
+    return true;
 }
 
 void EndFrame(std::mutex& queue_lock, bool drawn) {
     EndFrameInner(queue_lock, drawn);
-    if (X.frame_hold.owns_lock()) {
-        X.frame_hold.unlock();
-    }
 }
 
 } // namespace Vulkan::OotVr

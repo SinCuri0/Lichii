@@ -16,6 +16,7 @@
 #include "video_core/renderer_vulkan/present/lsfg_common.h"
 #endif
 #include "video_core/nx2_perf.h"
+#include "video_core/renderer_vulkan/vk_oot_vr_room.h"
 #include "video_core/renderer_vulkan/vk_present_manager.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
@@ -680,6 +681,13 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
     bool xr_copy = false;
     const VkImage xr_image = OotVr::BeginFrame(device, scheduler.submit_mutex, frame->width,
                                                frame->height, swapchain.GetImageFormat(), xr_copy);
+    if (xr_image && !oot_vr_room_tried) {
+        oot_vr_room_tried = true;
+        oot_vr_room = OotVrRoom::Load(device, memory_allocator);
+        if (oot_vr_room) {
+            OotVr::EnableRoom();
+        }
+    }
 #endif
 
     const vk::CommandBuffer cmdbuf{frame->cmdbuf};
@@ -822,6 +830,27 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
         xr_barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT,
                                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, xr_barrier);
+        if (const VkImage black = OotVr::BlackImageToClear()) {
+            xr_barrier.image = black;
+            xr_barrier.srcAccessMask = 0;
+            xr_barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            xr_barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            xr_barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                                   xr_barrier);
+            vk::CommandBuffer{cmdbuf}.ClearColorImage(black, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VkClearColorValue{},
+                                   xr_barrier.subresourceRange);
+            xr_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            xr_barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
+            xr_barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            xr_barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                   VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, xr_barrier);
+        }
+        OotVr::RoomEyes room_eyes;
+        if (oot_vr_room && OotVr::RoomToDraw(room_eyes)) {
+            oot_vr_room->Draw(cmdbuf, room_eyes);
+        }
     }
 #endif
 

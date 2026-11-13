@@ -5,12 +5,16 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <string>
 #include <utility>
 #include <vector>
+
+#include <fmt/ranges.h>
 
 #include "common/logging.h"
 #include "common/oot_vr.h"
@@ -128,28 +132,31 @@ void TurnView(float* m, const Head& head, float move) {
 
 // The head: a test pose if one is set, else the headset's. Test poses: EDEN_NX2_OOT_VR_FAKE_YAW /
 // _PITCH (degrees) at launch, or {u32 1, f32 yaw, f32 pitch} (degrees) written at
-// main+TestPoseOffset while the game runs (u32 2 turns it off).
+// main+TestPoseOffset while the game runs (u32 2 turns it off). {u32 3, f32 x, y, z} sets the test head
+// position in metres (x right, y up, z back) and keeps the last yaw and pitch.
 bool GetHead(Core::Memory::Memory& memory, u64 main_base, bool display, Head& head) {
     static const char* const yaw_text = std::getenv("EDEN_NX2_OOT_VR_FAKE_YAW");
     static const char* const pitch_text = std::getenv("EDEN_NX2_OOT_VR_FAKE_PITCH");
-    float yaw = yaw_text ? static_cast<float>(std::atof(yaw_text)) : 0.0f;
-    float pitch = pitch_text ? static_cast<float>(std::atof(pitch_text)) : 0.0f;
+    static float yaw = yaw_text ? static_cast<float>(std::atof(yaw_text)) : 0.0f;
+    static float pitch = pitch_text ? static_cast<float>(std::atof(pitch_text)) : 0.0f;
+    static std::array<float, 3> test_pos{};
     bool test = yaw_text || pitch_text;
-    std::array<u32, 3> written{};
+    std::array<u32, 4> written{};
     memory.ReadBlock(main_base + TestPoseOffset, written.data(), sizeof(written));
     if (written[0] == 1) {
         std::memcpy(&yaw, &written[1], 4);
         std::memcpy(&pitch, &written[2], 4);
         test = true;
+    } else if (written[0] == 3) {
+        std::memcpy(test_pos.data(), &written[1], sizeof(test_pos));
+        test = true;
     } else if (written[0] == 2) {
         return false;
     }
     if (test) {
-        yaw *= Deg;
-        pitch *= Deg;
-        head.fwd = {-std::sin(yaw) * std::cos(pitch), std::sin(pitch),
-                    -std::cos(yaw) * std::cos(pitch)};
-        head.pos = {};
+        head.fwd = {-std::sin(yaw * Deg) * std::cos(pitch * Deg), std::sin(pitch * Deg),
+                    -std::cos(yaw * Deg) * std::cos(pitch * Deg)};
+        head.pos = test_pos;
         return true;
     }
     Common::OotVr::HeadPose pose;
@@ -284,6 +291,32 @@ const std::vector<u16>& HeadBones(Core::Memory::Memory& memory, u64 resource) {
     return bones;
 }
 
+// Projection row 2, floats 10 and 11 (row-major): near 0.6 m, far 1000 m. Link's shield and sword are nearer.
+constexpr float CaptureNearM = 0.6f, CaptureFarM = 1000.0f;
+constexpr std::array<float, 2> CaptureDepthRow{-(CaptureFarM + CaptureNearM) / (CaptureFarM - CaptureNearM),
+                                               -2 * CaptureFarM * CaptureNearM / (CaptureFarM - CaptureNearM)};
+
+// EDEN_NX2_OOT_VR_CAPTURE=1: Link and the HUD hidden, for room captures.
+bool CaptureMode() {
+    static const bool capture = [] {
+        const char* const v = std::getenv("EDEN_NX2_OOT_VR_CAPTURE");
+        return v && *v && *v != '0';
+    }();
+    return capture;
+}
+
+// Link's body moved 100 m down in one piece, out of the capture's view.
+void MoveSkeletonAway(Core::Memory::Memory& memory, u64 skeleton) {
+    const u64 world = memory.Read64(skeleton + 0x20);
+    const u32 count = memory.Read16(memory.Read64(skeleton) + 0x38);
+    std::array<float, 16> bone;
+    for (u32 b = 0; b < count && count <= 1024; ++b) {
+        memory.ReadBlock(world + 0x40 * b, bone.data(), sizeof(bone));
+        bone[13] -= 100.0f;
+        memory.WriteBlock(world + 0x40 * b, bone.data(), sizeof(bone));
+    }
+}
+
 // World matrices at skeleton +0x20: 0x40 bytes per bone, 4 columns of 4 floats, from a local origin.
 void LinkSkeletonUpdate(Core::Memory::Memory& memory, u64 skeleton) {
     const u64 link = g_link.load(std::memory_order_relaxed);
@@ -303,6 +336,15 @@ void LinkSkeletonUpdate(Core::Memory::Memory& memory, u64 skeleton) {
         }
         g_head_feet = feet;
         g_has_head = true;
+    }
+    if (CaptureMode()) {
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            LOG_INFO(Kernel_SVC, "OoT VR capture: Link's body hidden");
+        }
+        MoveSkeletonAway(memory, skeleton);
+        return;
     }
     if (!Common::OotVr::FirstPerson()) {
         return;
@@ -356,7 +398,9 @@ struct UiScreen {
     bool menu;
 };
 
-constexpr std::array<UiScreen, 12> WatchedScreens{{
+constexpr u32 ShortCutId = 0x42fefb65; ///< the L1/R1 item menu: shown while +0x1A6 is 1, not 2
+
+constexpr std::array<UiScreen, 13> WatchedScreens{{
     {0xc0a4dec4, "PlusMenu_00", true},
     {0xf5b7168b, "MenuBG_00", true},
     {0x7ecad8bd, "ImportantMenu_00", true},
@@ -369,6 +413,7 @@ constexpr std::array<UiScreen, 12> WatchedScreens{{
     {0x2e6867e2, "Talk_00", false},
     {0xf91df64d, "MessageDialog_00", false},
     {0x5528d3d9, "CtrlGuide_00", false},
+    {ShortCutId, "ShortCut_00", false},
 }};
 
 // Screen open: byte +0x1A6 == 2 and signed byte +0x1A5 >= 0 (main+0xA687F0); UI manager layout in docs/vr-port-notes.md (recomp).
@@ -391,6 +436,61 @@ void UpdateMenuOpen(Core::Memory::Memory& memory, u64 main_base) {
         !memory.ReadBlock(memory.Read64(manager + 0x10), screens.data(), count * 8)) {
         return;
     }
+    // EDEN_NX2_OOT_VR_UI_TRACE=1: log every screen of the UI manager as it opens or closes, to find a menu's layout.
+    static const bool trace = [] {
+        const char* const v = std::getenv("EDEN_NX2_OOT_VR_UI_TRACE");
+        return v && *v && *v != '0';
+    }();
+    if (trace) {
+        // Every change in a screen's bytes +0x1A0..+0x1B0, not only the open flag: a menu may show in another state.
+        static std::vector<std::array<u8, 16>> traced;
+        traced.resize(std::max<size_t>(traced.size(), count), std::array<u8, 16>{});
+        for (u32 s = 0; s < count; ++s) {
+            if (!screens[s]) {
+                continue;
+            }
+            std::array<u8, 16> state;
+            memory.ReadBlock(screens[s] + 0x1A0, state.data(), state.size());
+            if (state == traced[s]) {
+                continue;
+            }
+            traced[s] = state;
+            const u64 name_ptr = memory.Read64(screens[s] + 0x178);
+            std::string name = name_ptr ? memory.ReadCString(name_ptr, 48) : std::string{};
+            LOG_INFO(Kernel_SVC, "OoT VR UI: screen {} '{}' +0x1A0: {:02x}", s, name, fmt::join(state, " "));
+        }
+        // The item menu's bytes +0x40..+0x200: what separates shown from hidden.
+        static std::array<std::array<u8, 0x1C0>, 2> wide{};
+        static std::array<bool, 2> wide_seen{};
+        const std::array<u32, 2> ids{ShortCutId, 0xc5a49707};
+        for (size_t n = 0; n < ids.size(); ++n) {
+            u32 index = count;
+            for (u32 k = 0, i = ids[n] % capacity; k < capacity && entries[i][0] != 0; ++k, i = (i + 1) % capacity) {
+                if (entries[i][0] == ids[n]) {
+                    index = entries[i][1];
+                    break;
+                }
+            }
+            if (index >= count || !screens[index]) {
+                continue;
+            }
+            std::array<u8, 0x1C0> now;
+            memory.ReadBlock(screens[index] + 0x40, now.data(), now.size());
+            if (wide_seen[n]) {
+                std::string diff;
+                for (size_t b = 0; b < now.size(); ++b) {
+                    if (now[b] != wide[n][b]) {
+                        diff += fmt::format(" +{:#x}:{:02x}>{:02x}", b + 0x40, wide[n][b], now[b]);
+                    }
+                }
+                if (!diff.empty()) {
+                    LOG_INFO(Kernel_SVC, "OoT VR UI: {} changed:{}", n ? "ShortCutBG_00" : "ShortCut_00", diff);
+                }
+            }
+            wide[n] = now;
+            wide_seen[n] = true;
+        }
+    }
     static std::array<int, WatchedScreens.size()> last;
     static bool started = false;
     if (!started) {
@@ -412,12 +512,20 @@ void UpdateMenuOpen(Core::Memory::Memory& memory, u64 main_base) {
         }
         std::array<s8, 2> state;
         memory.ReadBlock(screens[index] + 0x1A5, state.data(), state.size());
-        const int open = state[1] == 2 && state[0] >= 0;
+        const int open = id == ShortCutId ? state[1] == 1 : state[1] == 2 && state[0] >= 0;
         menu |= open && WatchedScreens[w].menu;
         if (open != last[w]) {
             LOG_INFO(Kernel_SVC, "OoT VR HUD: {} {} (+0x1A5 {}, +0x1A6 {})", WatchedScreens[w].name,
                      open ? "open" : "closed", state[0], state[1]);
             last[w] = open;
+        }
+    }
+    if (trace) {
+        static u32 last_flag = ~0u;
+        const u32 flag = memory.Read32(main_base + HudParamsOffset + 0x20);
+        if (flag != last_flag) {
+            LOG_INFO(Kernel_SVC, "OoT VR HUD: cave item menu flag {}", flag);
+            last_flag = flag;
         }
     }
     g_menu_now.store(menu, std::memory_order_relaxed);
@@ -504,6 +612,15 @@ void CameraSource(Core::Memory::Memory& memory, u64 main_base, u64 view_object) 
     std::array<float, 3> eye;
     for (int k = 0; k < 3; ++k) {
         eye[k] = -(m[k] * m[3] + m[4 + k] * m[7] + m[8 + k] * m[11]);
+    }
+    if (CaptureMode()) {
+        static std::array<float, 6> logged{};
+        const std::array<float, 6> pose{head.pos[0], head.pos[1], head.pos[2], head.fwd[0], head.fwd[1], head.fwd[2]};
+        if (pose != logged) {
+            logged = pose;
+            LOG_INFO(Kernel_SVC, "OoT VR capture: test position {:.2f} {:.2f} {:.2f}, eye {:.3f} {:.3f} {:.3f}, looking {:.3f} {:.3f} {:.3f}",
+                     pose[0], pose[1], pose[2], eye[0], eye[1], eye[2], -m[8], -m[9], -m[10]);
+        }
     }
     const std::array<float, 3> at{eye[0] - m[8] * distance, eye[1] - m[9] * distance,
                                   eye[2] - m[10] * distance};
@@ -618,10 +735,13 @@ bool CallNx2OotVr(Core::System& system, u32 imm, std::span<u64, 8> args) {
             memory.ReadBlock(args[3] + 0xC + 20, &p11, 4);
             static std::atomic<u64> seen{};
             if (seen.fetch_add(1, std::memory_order_relaxed) % 120 == 0) {
-                float fovy;
-                memory.ReadBlock(args[3] + 0xA0, &fovy, 4);
-                LOG_INFO(Kernel_SVC, "OoT VR camera: game projection at set-view P00 {:.3f} P11 {:.3f} fovy {:.3f}",
-                         p00, p11, fovy);
+                std::array<float, 16> m;
+                std::array<float, 8> fields;
+                memory.ReadBlock(args[3] + 0xC, m.data(), sizeof(m));
+                memory.ReadBlock(args[3] + 0xA0, fields.data(), sizeof(fields));
+                LOG_INFO(Kernel_SVC, "OoT VR camera: game projection at set-view P00 {:.3f} P11 {:.3f} fovy {:.3f}; "
+                         "matrix {}; fields from +0xA0 {}",
+                         p00, p11, fields[0], fmt::join(m, " "), fmt::join(fields, " "));
             }
             float tan_x, tan_y;
             if (Common::OotVr::HeadsetTan(tan_x, tan_y)) {
@@ -631,10 +751,10 @@ bool CallNx2OotVr(Core::System& system, u32 imm, std::span<u64, 8> args) {
                 if (hud_frames++ % 120 < 2) {
                     LOG_INFO(Kernel_SVC, "OoT VR HUD: eye {} moves the HUD {:+.1f} sideways", hud_eye, hud_shift);
                 }
-                const std::array<u32, 8> hud_params{std::bit_cast<u32>(Common::OotVr::HudSize().load()), 1,
+                const std::array<u32, 8> hud_params{std::bit_cast<u32>(CaptureMode() ? 0.0f : Common::OotVr::HudSize().load()), 1,
                                                     std::bit_cast<u32>(Common::OotVr::HudPull().load()),
                                                     std::bit_cast<u32>(Common::OotVr::MapY().load()),
-                                                    std::bit_cast<u32>(Common::OotVr::TextScale(tan_x)),
+                                                    std::bit_cast<u32>(CaptureMode() ? 0.0f : Common::OotVr::TextScale(tan_x)),
                                                     std::bit_cast<u32>(Common::OotVr::PromptY().load()),
                                                     std::bit_cast<u32>(Common::OotVr::TalkY().load()),
                                                     std::bit_cast<u32>(hud_shift)};
@@ -646,10 +766,15 @@ bool CallNx2OotVr(Core::System& system, u32 imm, std::span<u64, 8> args) {
                 for (const size_t matrix : {0xC, 0x4C}) {
                     std::memcpy(object.data() + matrix, &p00, 4);
                     std::memcpy(object.data() + matrix + 20, &p11, 4);
+                    if (CaptureMode()) {
+                        std::memcpy(object.data() + matrix + 40, CaptureDepthRow.data(), sizeof(CaptureDepthRow));
+                    }
                 }
                 const auto fov = WideFields(tan_x, tan_y);
                 std::memcpy(object.data() + 0xA0, fov.data(), sizeof(fov));
                 memory.WriteBlock(main_base + ProjectionCopyOffset, object.data(), object.size());
+                // Talk cameras narrow the game's own projection after the camera update; the clouds read it.
+                memory.WriteBlock(args[3], object.data(), object.size());
                 args[3] = main_base + ProjectionCopyOffset;
             }
             Common::OotVr::SetGameProjection(p00, p11);

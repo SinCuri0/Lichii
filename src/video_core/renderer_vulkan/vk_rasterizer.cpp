@@ -3421,7 +3421,12 @@ void RasterizerVulkan::FrameDumpPass(const Framebuffer* framebuffer) {
     }
     bool recorded = false;
     if (frame_dump.Capturing()) {
-        recorded |= frame_dump.BeginPass(framebuffer, colors);
+        std::array<ImageView*, VideoCommon::NUM_RT + 1> targets{};
+        std::ranges::copy(colors, targets.begin());
+        if (const ImageViewId depth = texture_cache.GetRenderTargets().depth_buffer_id) {
+            targets.back() = &texture_cache.GetImageView(depth);
+        }
+        recorded |= frame_dump.BeginPass(framebuffer, targets);
     }
     if (flash_watch.WatchesPasses()) {
         recorded |= flash_watch.BeginPass(framebuffer, colors);

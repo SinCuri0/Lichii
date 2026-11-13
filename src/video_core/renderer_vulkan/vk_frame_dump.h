@@ -7,6 +7,7 @@
 #include <condition_variable>
 #include <deque>
 #include <filesystem>
+#include <map>
 #include <fstream>
 #include <mutex>
 #include <optional>
@@ -221,6 +222,12 @@ private:
     bool request_now{};
     u64 request_id{};
     bool host_copies{};
+    bool final_only{}; ///< EDEN_NX2_FRAME_DUMP_FINAL: only the present and each depth target as the frame left it
+    struct FinalDepth {
+        Target target;
+        u32 uses;
+    };
+    std::map<GPUVAddr, FinalDepth> final_depths;
     double trigger_seconds{};
     std::chrono::steady_clock::time_point start;
     u64 frame{};

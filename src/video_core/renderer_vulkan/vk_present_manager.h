@@ -10,6 +10,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <deque>
+#include <memory>
 #include <mutex>
 #include <vector>
 #include <boost/container/deque.hpp>
@@ -29,6 +30,7 @@ namespace Vulkan {
 class Device;
 class Scheduler;
 class Swapchain;
+class OotVrRoom;
 
 struct Frame {
     u32 width;
@@ -123,6 +125,8 @@ private:
     bool blit_supported;
     bool storage_supported;
     bool use_present_thread;
+    std::unique_ptr<OotVrRoom> oot_vr_room;
+    bool oot_vr_room_tried = false;
     std::atomic<std::size_t> image_count{};
     std::atomic<std::size_t> swapchain_image_count{};
     std::atomic<VkFormat> swapchain_image_format{};

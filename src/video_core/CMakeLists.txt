@@ -647,6 +647,8 @@ if (ENABLE_OOT_VR)
     target_sources(video_core PRIVATE
         renderer_vulkan/vk_oot_vr.cpp
         renderer_vulkan/vk_oot_vr.h
+        renderer_vulkan/vk_oot_vr_room.cpp
+        renderer_vulkan/vk_oot_vr_room.h
     )
     target_link_libraries(video_core PRIVATE OpenXR::openxr_loader)
     target_compile_definitions(video_core PRIVATE EDEN_OOT_VR_XR)

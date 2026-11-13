@@ -236,6 +236,8 @@ FrameDump::FrameDump(const Device& device_, MemoryAllocator& memory_allocator_,
         return;
     }
     enabled = true;
+    const char* const final_value = std::getenv("EDEN_NX2_FRAME_DUMP_FINAL");
+    final_only = final_value && *final_value != '\0' && *final_value != '0';
     const char* const sampled_value = std::getenv("EDEN_NX2_FRAME_DUMP_SAMPLED");
     sampled = sampled_value && *sampled_value != '\0' && *sampled_value != '0';
     if (const char* const from = std::getenv("EDEN_NX2_FRAME_DUMP_SAMPLED_FROM")) {
@@ -385,7 +387,12 @@ bool FrameDump::BeginPass(const void* framebuffer, std::span<ImageView* const> c
             continue;
         }
         if (const auto target = MakeTarget(*colors[slot], slot)) {
-            pass_targets.push_back(*target);
+            if (!final_only) {
+                pass_targets.push_back(*target);
+            } else if (target->depth_encoding != DepthEncoding::None) {
+                auto& depth = final_depths[target->gpu_addr];
+                depth = {*target, depth.uses + 1};
+            }
         }
     }
     pass_hashes.clear();
@@ -607,7 +614,7 @@ bool FrameDump::EndPass() {
         recorded |= Record(
             target,
             fmt::format("{:04}_pass{:03}_d{}-{}_rt{}", sequence++, pass_index, pass_first_draw,
-                        draws, target.slot),
+                        draws, target.depth_encoding == DepthEncoding::None ? fmt::to_string(target.slot) : "z"),
             fmt::format(R"("kind":"pass","pass":{},"first_draw":{},"draw_count":{},"slot":{},"shaders":[{}])",
                         pass_index, pass_first_draw, draws - pass_first_draw, target.slot,
                         shaders));
@@ -617,6 +624,9 @@ bool FrameDump::EndPass() {
 }
 
 void FrameDump::CaptureDispatch(u64 shader_hash, std::span<ImageView* const> written) {
+    if (final_only) {
+        return;
+    }
     const u32 dispatch = dispatches++;
     for (u32 slot = 0; slot < written.size(); ++slot) {
         const auto target = written[slot] ? MakeTarget(*written[slot], slot) : std::nullopt;
@@ -632,6 +642,11 @@ void FrameDump::CaptureDispatch(u64 shader_hash, std::span<ImageView* const> wri
 }
 
 void FrameDump::CapturePresent(ImageView& view) {
+    for (const auto& [address, depth] : final_depths) {
+        Record(depth.target, fmt::format("{:04}_final_rtz", sequence++),
+               fmt::format(R"("kind":"final_depth","uses":{})", depth.uses));
+    }
+    final_depths.clear();
     if (const auto target = MakeTarget(view, 0)) {
         Record(*target, fmt::format("{:04}_present", sequence++),
                fmt::format(R"("kind":"present","after_draws":{})", draws));
@@ -953,6 +968,7 @@ void FrameDump::ResetAfterCapture() {
     sequence = images = 0;
     truncated = false;
     pass_framebuffer = nullptr;
+    final_depths.clear();
     pass_targets.clear();
     pass_hashes.clear();
     pass_sampled.clear();
