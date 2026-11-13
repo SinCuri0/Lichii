@@ -9,8 +9,8 @@ Last checked: 2026-11-13.
 |---|---|---|---|---|
 | `D:\Games\Emulators\lichii repo` | `oot-vr-mod` | `eglantine` | `Eglantine-Community/Eglantine` (the same repo as `Djihads80/Eglantine`) | Upstream emulator. Read only. |
 | | | `origin` | `Frizti/Fritchii` | The fork `oot-vr-mod` starts from (`origin/oot-gather-fix`). Read only. |
-| | | `zortos` | `zortos293/Lichii` | The repo SinCuri0/Lichii is forked from on GitHub. Our PRs to upstream Lichii go here, against `nx2`. Read only. |
-| | | `sincuri0` | `SinCuri0/Lichii` | **Our repo. All our work goes here.** |
+| | | `zortos` | `zortos293/Lichii` | The repo SinCuri0/Lichii-OoT-VR-Mod is forked from on GitHub. Our PRs to upstream Lichii go here, against `nx2`. Read only. |
+| | | `sincuri0` | `SinCuri0/Lichii-OoT-VR-Mod` | **Our repo: only the Lichii OoT VR mod. One branch, `oot-vr-mod` (the default). All our work goes here.** |
 | `D:\Games\Emulators\recomp` | `feat/vr-openxr` | `origin` | `sostenesfreitas/ocarina-recomp` | The OoT recompilation; its development moved to Hookshot. Read only. |
 | | | `vr` | `SinCuri0/Curios-recomp-VR` | Our recomp fork with the VR research. |
 
@@ -123,7 +123,7 @@ Keys while playing (Windows):
 - Check how far behind we are:
   `git rev-list --left-right --count HEAD...eglantine/nx2` and `HEAD...origin/oot-gather-fix`.
   On 2026-11-13: 358 behind `zortos/nx2`, 252 behind `eglantine/nx2`, 0 behind `origin/oot-gather-fix`.
-- Check open PRs on our repo: `curl -s "https://api.github.com/repos/SinCuri0/Lichii/pulls"` (`gh` is not installed).
+- Check open PRs on our repo: `curl -s "https://api.github.com/repos/SinCuri0/Lichii-OoT-VR-Mod/pulls"` (`gh` is not installed).
   Read a PR with `git fetch sincuri0 pull/<n>/head:refs/pr/<n>`. Do not build or run PR code before you read it.
 - Merge upstream into the VR branch with `git merge`, not rebase, so pushed history stays the same. Commit or stash first.
 - Before a new fix, check upstream for an existing one (see `AGENTS.md`, "Before writing a fix").

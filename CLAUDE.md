@@ -17,7 +17,7 @@ status, hooks, settings, keys and the sync rules. Game facts (addresses, offsets
   `eglantine/nx2` and `origin/oot-gather-fix`. Do the same in `D:\Games\Emulators\recomp` against `origin/main` and
   `vr/feat/vr-openxr`.
 - Commit each working step. Do not end a session with uncommitted work; make a WIP commit if needed.
-- Our repo is SinCuri0/Lichii (remote `sincuri0`), a GitHub fork of zortos293/Lichii (remote `zortos`). All our work
+- Our repo is SinCuri0/Lichii-OoT-VR-Mod (remote `sincuri0`), a GitHub fork of zortos293/Lichii (remote `zortos`). All our work
   goes to `sincuri0`. `zortos`, `eglantine` and `origin` (Frizti/Fritchii) are read only: fetch and merge from them,
   never push. Only open a PR upstream when the owner asks.
 - Ask before you push.
