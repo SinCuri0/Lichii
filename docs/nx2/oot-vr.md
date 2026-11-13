@@ -9,11 +9,12 @@ Last checked: 2026-11-13.
 |---|---|---|---|---|
 | `D:\Games\Emulators\lichii repo` | `feat/oot-vr` | `eglantine` | `Eglantine-Community/Eglantine` (the same repo as `Djihads80/Eglantine`) | Upstream emulator. Read only. |
 | | | `origin` | `Frizti/Fritchii` | The fork `feat/oot-vr` starts from (`origin/oot-gather-fix`). Read only. |
+| | | `zortos` | `zortos293/Lichii` | The repo SinCuri0/Lichii is forked from on GitHub. Our PRs to upstream Lichii go here, against `nx2`. Read only. |
 | | | `sincuri0` | `SinCuri0/Lichii` | **Our repo. All our work goes here.** |
 | `D:\Games\Emulators\recomp` | `feat/vr-openxr` | `origin` | `sostenesfreitas/ocarina-recomp` | The OoT recompilation; its development moved to Hookshot. Read only. |
 | | | `vr` | `SinCuri0/Curios-recomp-VR` | Our recomp fork with the VR research. |
 
-We cannot commit or push to Eglantine, Fritchii or ocarina-recomp. We only fetch and merge from them. Their push URLs
+We cannot commit or push to zortos293/Lichii, Eglantine, Fritchii or ocarina-recomp. We only fetch and merge from them. Their push URLs
 are set to `no_push_read_only` in the local git config, so a push to them fails. `remote.pushDefault` is `sincuri0`
 here and `vr` in the recomp.
 
@@ -121,7 +122,9 @@ Keys while playing (Windows):
 - Fetch all remotes at the start of each session: `git fetch --all --prune`.
 - Check how far behind we are:
   `git rev-list --left-right --count HEAD...eglantine/nx2` and `HEAD...origin/oot-gather-fix`.
-  On 2026-11-13: 252 commits behind `eglantine/nx2`, 0 behind `origin/oot-gather-fix`.
+  On 2026-11-13: 358 behind `zortos/nx2`, 252 behind `eglantine/nx2`, 0 behind `origin/oot-gather-fix`.
+- Check open PRs on our repo: `curl -s "https://api.github.com/repos/SinCuri0/Lichii/pulls"` (`gh` is not installed).
+  Read a PR with `git fetch sincuri0 pull/<n>/head:refs/pr/<n>`. Do not build or run PR code before you read it.
 - Merge upstream into the VR branch with `git merge`, not rebase, so pushed history stays the same. Commit or stash first.
 - Before a new fix, check upstream for an existing one (see `AGENTS.md`, "Before writing a fix").
 - Never commit `mods/` (third-party mod archives) or files made from the game (`room.bin`, captures, shader dumps).
