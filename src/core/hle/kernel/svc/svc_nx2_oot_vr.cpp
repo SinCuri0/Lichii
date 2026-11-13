@@ -7,6 +7,7 @@
 #include <bit>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -48,6 +49,8 @@ constexpr u64 LinkVtableOffset = 0x4B25E18;
 // The skinning matrices (main+0x14E0200): `mov x19, x0` becomes svc 0xF7, x0 = a skeleton.
 constexpr u32 SkeletonSvc = 0xF7;
 constexpr u64 SkeletonSiteOffset = 0x14E0220;
+// The HUD code (tools/nx2/oot_vr_hud.s) calls svc 0xF8 every frame: x0 = hud_params, w1 = the item menu is shown.
+constexpr u32 FrozenSvc = 0xF8;
 constexpr u32 HeadBone = 103;
 constexpr float HeadScale = 0.001f;
 // Metres from Link's head bone (the top of his neck) up to the eye.
@@ -248,6 +251,8 @@ bool ViewPose(u64 view_object, Common::OotVr::HeadPose& pose) {
     return false;
 }
 
+std::atomic<u64> g_view_scene{}; ///< the scene that owns g_display_view: views at +0x138, count +0x130
+std::atomic<u64> g_display_view{}; ///< the displayed camera's view (set-view x0); +0x54dc bit 0: drawn
 std::atomic<u64> g_link{}; ///< Link's actor: feet float3 +0x31C, "Player" object +0x8
 std::mutex g_head_lock;
 std::array<float, 3> g_head{}; ///< Link's head bone in the world, metres
@@ -540,15 +545,29 @@ void UpdateMenuOpen(Core::Memory::Memory& memory, u64 main_base) {
 
 // View object: 3x4 view at +0x8, eye float3 +0x38, look-at float3 +0x44, up float3 +0x50, eye
 // double3 +0x60, look-at double3 +0x78 (written by main+0x4C48C0).
-void CameraSource(Core::Memory::Memory& memory, u64 main_base, u64 view_object) {
+// The game's own camera (view object +0x8..+0x90: matrix, eye and target), as the last camera update left it before
+// the head pose turned it. The item menu freezes the camera update; set-view then turns this copy each frame.
+std::array<u8, 0x88> g_game_camera{};
+u64 g_game_camera_view = 0;
+std::atomic<u64> g_camera_updates{}; ///< camera-source hook calls for the displayed camera
+
+void CameraSource(Core::Memory::Memory& memory, u64 main_base, u64 view_object, bool from_hook = true) {
     static std::atomic<u64> turned{}, other{};
     const bool mine = view_object != 0 && IsDisplayView(view_object);
+    if (mine && from_hook) {
+        memory.ReadBlock(view_object + 0x8, g_game_camera.data(), g_game_camera.size());
+        g_game_camera_view = view_object;
+        g_camera_updates.fetch_add(1, std::memory_order_relaxed);
+    }
     const u64 count = (mine ? turned : other).fetch_add(1, std::memory_order_relaxed) + 1;
     if (mine && count % 300 == 0) {
         LOG_INFO(Kernel_SVC, "OoT VR camera: {} displayed camera updates turned, {} other camera updates",
                  count, other.load(std::memory_order_relaxed));
     }
     if (!mine) {
+        if (Common::OotVr::ItemMenu().load(std::memory_order_relaxed) && count % 60 == 1) {
+            LOG_INFO(Kernel_SVC, "OoT VR camera: item menu: camera update for view {:#x} (not displayed)", view_object);
+        }
         return;
     }
     const u64 projection = g_display_projection.load(std::memory_order_relaxed);
@@ -630,10 +649,132 @@ void CameraSource(Core::Memory::Memory& memory, u64 main_base, u64 view_object) 
     memory.WriteBlock(view_object + 0x60, doubles.data(), sizeof(doubles));
 }
 
+// EDEN_NX2_OOT_VR_MENU_DIFF=1: the words of main's data and BSS that hold one value whenever the item menu is gone and
+// another whenever it is shown, narrowed over each opening (to find what stops the world being drawn).
+void ItemMenuDiff(Core::Memory::Memory& memory, const Kernel::KProcess& process, u64 main_base, bool shown) {
+    static const bool on = [] {
+        const char* const v = std::getenv("EDEN_NX2_OOT_VR_MENU_DIFF");
+        return v && *v && *v != '0';
+    }();
+    if (!on) {
+        return;
+    }
+    // Words in main's data and BSS and in the heap that hold one value while the item menu is gone and another 90
+    // frames after it opens, at every opening. A snapshot of the gone state is taken 40 frames after each close.
+    constexpr u64 Chunk = 0x200000;
+    struct Candidate {
+        u64 address;
+        u32 gone, shown;
+    };
+    static std::vector<std::pair<u64, std::vector<u32>>> gone_copy;
+    static std::vector<Candidate> candidates;
+    static std::vector<u32> buffer(Chunk / 4);
+    static u32 gone_frames = 0, shown_frames = 0, openings = 0;
+    static bool have_gone = false;
+    if (!shown) {
+        shown_frames = 0;
+        if (++gone_frames != 40) {
+            return;
+        }
+        gone_copy.clear();
+        // ReadBlockUnsafe: no flush of GPU-written memory. At most 1 GiB in all (the guest commits about 9 GiB).
+        u64 total = 0;
+        const auto take = [&](u64 base, u64 size) {
+            for (u64 a = base; a < base + size && total < 0x40000000; a += Chunk) {
+                const u64 n = std::min(Chunk, base + size - a);
+                if (!memory.IsValidVirtualAddressRange(a, n)) {
+                    continue;
+                }
+                auto& [address, words] = gone_copy.emplace_back(a, std::vector<u32>(n / 4));
+                memory.ReadBlockUnsafe(a, words.data(), n);
+                total += n;
+            }
+        };
+        take(main_base + 0x484D000, 0x653000);
+        take(GetInteger(process.GetPageTable().GetHeapRegionStart()), process.GetPageTable().GetHeapRegionSize());
+        have_gone = true;
+        if (openings == 0) {
+            u64 bytes = 0;
+            for (const auto& [a, w] : gone_copy) {
+                bytes += w.size() * 4;
+            }
+            LOG_INFO(Kernel_SVC, "OoT VR menu diff: gone snapshot, {} MiB in {} chunks; heap region {:#x} size {:#x}",
+                     bytes >> 20, gone_copy.size(), GetInteger(process.GetPageTable().GetHeapRegionStart()),
+                     process.GetPageTable().GetHeapRegionSize());
+        }
+        return;
+    }
+    gone_frames = 0;
+    if (++shown_frames != 90 || !have_gone) {
+        return;
+    }
+    have_gone = false;
+    std::vector<Candidate> found;
+    const bool first = openings++ == 0;
+    if (first) {
+        for (const auto& [a, words] : gone_copy) {
+            memory.ReadBlockUnsafe(a, buffer.data(), words.size() * 4);
+            for (size_t i = 0; i < words.size(); ++i) {
+                if (words[i] != buffer[i] && found.size() < 16'000'000) {
+                    found.push_back({a + i * 4, words[i], buffer[i]});
+                }
+            }
+        }
+    } else {
+        for (const Candidate& c : candidates) {
+            const auto it = std::upper_bound(gone_copy.begin(), gone_copy.end(), c.address,
+                                             [](u64 v, const auto& e) { return v < e.first; });
+            if (it == gone_copy.begin()) {
+                continue;
+            }
+            const auto& [a, words] = *std::prev(it);
+            const u64 i = (c.address - a) / 4;
+            u32 now = 0;
+            memory.ReadBlockUnsafe(c.address, &now, 4);
+            if (i < words.size() && words[i] == c.gone && now == c.shown) {
+                found.push_back(c);
+            }
+        }
+    }
+    candidates = std::move(found);
+    LOG_INFO(Kernel_SVC, "OoT VR menu diff: opening {}, {} words differ every time", openings, candidates.size());
+    if (candidates.size() <= 200000) {
+        if (std::FILE* f = std::fopen("D:/lxc/vrdiff/menu_diff.txt", "w")) {
+            for (const Candidate& c : candidates) {
+                // The object the word is in: the nearest pointer into main below it (a vtable), as main offset and distance.
+                u64 vtable = 0, distance = 0;
+                std::array<u64, 0x100> before{};
+                if (c.address - main_base >= 0x5000000 && c.address >= 0x800) {
+                    memory.ReadBlockUnsafe((c.address & ~u64{7}) - 0x800, before.data(), 0x800);
+                    for (size_t k = before.size(); k-- > 0;) {
+                        if (before[k] - main_base < 0x5000000) {
+                            vtable = before[k] - main_base;
+                            distance = (c.address & ~u64{7}) - 0x800 + k * 8;
+                            distance = c.address - distance;
+                            break;
+                        }
+                    }
+                }
+                std::fprintf(f, "%llx %08x %08x %llx %llx\n", static_cast<unsigned long long>(c.address - main_base),
+                             c.gone, c.shown, static_cast<unsigned long long>(vtable),
+                             static_cast<unsigned long long>(distance));
+            }
+            std::fclose(f);
+        }
+    }
+    if (candidates.size() <= 200) {
+        for (const Candidate& c : candidates) {
+            const bool in_main = c.address - main_base < 0x5000000;
+            LOG_INFO(Kernel_SVC, "OoT VR menu diff: {}{:#x}: gone {:#010x}, shown {:#010x}", in_main ? "main+" : "",
+                     in_main ? c.address - main_base : c.address, c.gone, c.shown);
+        }
+    }
+}
+
 } // Anonymous namespace
 
 bool CallNx2OotVr(Core::System& system, u32 imm, std::span<u64, 8> args) {
-    if (imm != VrSvc && imm != CameraSvc && imm != TargetSvc && imm != SkeletonSvc) {
+    if (imm != VrSvc && imm != CameraSvc && imm != TargetSvc && imm != SkeletonSvc && imm != FrozenSvc) {
         return false;
     }
     auto& kernel = system.Kernel();
@@ -643,6 +784,135 @@ bool CallNx2OotVr(Core::System& system, u32 imm, std::span<u64, 8> args) {
     }
     auto* const arm = process.GetArmInterface(kernel.CurrentPhysicalCoreIndex());
     auto& memory = process.GetMemory();
+    if (imm == FrozenSvc) {
+        // Every frame: w1 = the item menu is shown.
+        const bool shown = (args[1] & 1) != 0;
+        if (Common::OotVr::ItemMenu().exchange(shown, std::memory_order_relaxed) != shown) {
+            LOG_INFO(Kernel_SVC, "OoT VR HUD: item menu {}", shown ? "shown" : "gone");
+        }
+        ItemMenuDiff(memory, process, args[0] - HudParamsOffset, shown);
+        // Test: EDEN_NX2_OOT_VR_MENU_TEST_YAW=<degrees> turns the test head pose that far 120 frames into each item
+        // menu opening and back when it closes, to see whether the world behind the menu turns.
+        {
+            static const float test_yaw = [] {
+                const char* const v = std::getenv("EDEN_NX2_OOT_VR_MENU_TEST_YAW");
+                return v && *v ? static_cast<float>(std::atof(v)) : 0.0f;
+            }();
+            static u32 menu_frames = 0;
+            static bool turned = false;
+            menu_frames = shown ? menu_frames + 1 : 0;
+            if (test_yaw != 0.0f && (menu_frames == 120 || (!shown && turned))) {
+                turned = shown;
+                struct {
+                    u32 mode;
+                    float yaw, pitch;
+                } pose{1, shown ? test_yaw : 0.0f, 0.0f};
+                memory.WriteBlock(args[0] - HudParamsOffset + TestPoseOffset, &pose, sizeof(pose));
+                LOG_INFO(Kernel_SVC, "OoT VR test: item menu head yaw {}", pose.yaw);
+            }
+        }
+        // The item menu pauses the camera (clears camera +0x88 bit 0), and with it the world draw. Keep the camera
+        // running while the menu is shown, so the world stays live behind it (EDEN_NX2_OOT_VR_MENU_VIEW=0 turns this
+        // off). EDEN_NX2_OOT_VR_VIEW_TRACE=1 logs the view's draw inputs.
+        if (const u64 view = g_display_view.load(std::memory_order_relaxed)) {
+            static const bool force = [] {
+                const char* const v = std::getenv("EDEN_NX2_OOT_VR_MENU_VIEW");
+                return !(v && *v == '0');
+            }();
+            static const bool trace = [] {
+                const char* const v = std::getenv("EDEN_NX2_OOT_VR_VIEW_TRACE");
+                return v && *v && *v != '0';
+            }();
+            // EDEN_NX2_OOT_VR_WATCH_VIEW=1: log every guest write to the camera's +0x91 once the item menu is shown
+            // (arm_dynarmic_64.cpp).
+            static const bool watch = [] {
+                const char* const v = std::getenv("EDEN_NX2_OOT_VR_WATCH_VIEW");
+                return v && *v && *v != '0';
+            }();
+            static u64 display = 0;
+            if (const u64 cam = memory.Read64(view + 0x5f0); watch && shown && cam && display == 0 &&
+                Common::OotVr::WriteWatch().exchange(cam + 0x91) != cam + 0x91) {
+                memory.MarkRegionDebug((cam + 0x91) & ~u64{0xFFF}, 0x1000, true);
+                LOG_INFO(Kernel_SVC, "OoT VR view: watching writes to the camera's +0x91 at {:#x}", cam + 0x91);
+            }
+            // The camera manager (main+0x6531C0 x0) is in a saved register of that writer: cameras at +0x28 (count
+            // +0x20), displays at +0x18 (count +0x10). The camera's display: index camera+0x90, else camera+0x8f.
+            if (const u64 cam = memory.Read64(view + 0x5f0); watch && cam && display == 0 &&
+                Common::OotVr::WriteWatch().load() == cam + 0x91) {
+                for (auto& reg : Common::OotVr::WriteWatchRegs()) {
+                    const u64 m = reg.load(std::memory_order_relaxed);
+                    if (m < 0x1000 || !memory.IsValidVirtualAddressRange(m + 0x10, 0x20)) {
+                        continue;
+                    }
+                    const u32 cams = memory.Read32(m + 0x20), displays = memory.Read32(m + 0x10);
+                    const u64 list = memory.Read64(m + 0x28);
+                    if (cams == 0 || cams > 64 || displays == 0 || displays > 16 ||
+                        !memory.IsValidVirtualAddressRange(list, cams * 8)) {
+                        continue;
+                    }
+                    for (u32 i = 0; i < cams; ++i) {
+                        if (memory.Read64(list + i * 8) == cam) {
+                            const u8 a = memory.Read8(cam + 0x90);
+                            const u8 index = a != 0xff ? a : memory.Read8(cam + 0x8f);
+                            if (index < displays) {
+                                display = memory.Read64(memory.Read64(m + 0x18) + index * 8);
+                            }
+                            LOG_INFO(Kernel_SVC, "OoT VR view: camera manager {:#x}, display {} at {:#x}", m, index,
+                                     display);
+                            break;
+                        }
+                    }
+                    if (display) {
+                        Common::OotVr::WriteWatch().store(display + 0x7d0);
+                        memory.MarkRegionDebug((display + 0x7d0) & ~u64{0xFFF}, 0x1000, true);
+                        break;
+                    }
+                }
+            }
+            if (display) {
+                static u32 last_display = 0xFFFFFFFF;
+                const u32 d = memory.Read32(display + 0x7d0);
+                if (d != last_display) {
+                    last_display = d;
+                    LOG_INFO(Kernel_SVC, "OoT VR view: display +0x7d0 = {:#010x}, item menu {}", d, shown);
+                }
+            }
+            const u16 flags = memory.Read16(view + 0x54dc);
+            static u32 last = 0x10000;
+            if (trace && flags != last) {
+                last = flags;
+                LOG_INFO(Kernel_SVC, "OoT VR view {:#x}: +0x54dc = {:#06x}, item menu {}", view, flags, shown);
+            }
+            // The inputs of main+0x3437C0, which sets bit 0: camera +0x91, +0x884 bit 4, +0x228; scene +0x3b18 bit 6
+            // unless the view's layer entry +0x270 is 1.
+            if (const u64 scene = g_view_scene.load(std::memory_order_relaxed); trace && scene) {
+                const u64 camera = memory.Read64(view + 0x5f0);
+                const u64 layer = memory.Read64(scene + 0x1b88) + memory.Read8(view + 8) * 0x278ULL;
+                const auto inputs = fmt::format(
+                    "camera {:#x} +0x88 {:#06x} +0x8a {:#06x} +0x8c {:#06x} +0x91 {} +0x884 {:#06x} +0x228 {}; scene +0x3b14 {:#010x} +0x3b18 {:#010x}; "
+                    "layer +0x270 {}", camera, camera ? memory.Read16(camera + 0x88) : 0, camera ? memory.Read16(camera + 0x8a) : 0,
+                    camera ? memory.Read16(camera + 0x8c) : 0, camera ? memory.Read8(camera + 0x91) : 0,
+                    camera ? memory.Read16(camera + 0x884) : 0, camera ? memory.Read64(camera + 0x228) != 0 : false,
+                    memory.Read32(scene + 0x3b14), memory.Read32(scene + 0x3b18),
+                    memory.Read8(layer + 0x270));
+                static std::string last_inputs;
+                if (inputs != last_inputs) {
+                    last_inputs = inputs;
+                    LOG_INFO(Kernel_SVC, "OoT VR view inputs: {}, item menu {}", inputs, shown);
+                }
+            }
+            // The camera manager (main+0x6531C0) updates a camera, and sets its +0x91 that main+0x3437C0 needs to mark
+            // the view drawn, only while camera +0x88 has bits 0 and 1. The menu clears bit 0 once when it opens.
+            const u64 camera = memory.Read64(view + 0x5f0);
+            if (force && shown && camera && (memory.Read16(camera + 0x88) & 3) != 3) {
+                memory.Write16(camera + 0x88, static_cast<u16>(memory.Read16(camera + 0x88) | 3));
+                static u32 forced = 0;
+                LOG_INFO(Kernel_SVC, "OoT VR view: the item menu paused the camera; kept it running ({} times)",
+                         ++forced);
+            }
+        }
+        return true;
+    }
     ThreadContext ctx{};
     arm->GetContext(ctx);
     if (imm == TargetSvc) {
@@ -693,6 +963,33 @@ bool CallNx2OotVr(Core::System& system, u32 imm, std::span<u64, 8> args) {
     const bool from_camera =
         caller == DisplayCallerOffset || caller == 0x33A320 || caller == 0x33A368;
     const bool display = view_index == 0 && caller == DisplayCallerOffset;
+    if (display) {
+        g_display_view.store(args[0], std::memory_order_relaxed);
+        // The scene is in a callee-saved register of the caller (main+0x798A0): views at +0x138, 0x5548 bytes each.
+        if (!g_view_scene.load(std::memory_order_relaxed)) {
+            // Registers x0..x28, then the caller's stack frame.
+            std::array<u64, 29 + 256> cands{};
+            for (int r = 0; r <= 28; ++r) {
+                cands[r] = ctx.r[r];
+            }
+            if (memory.IsValidVirtualAddressRange(ctx.sp, 256 * 8)) {
+                memory.ReadBlock(ctx.sp, cands.data() + 29, 256 * 8);
+            }
+            for (int r = 0; r < static_cast<int>(cands.size()); ++r) {
+                const u64 s = cands[r];
+                if (s < 0x1000 || !memory.IsValidVirtualAddressRange(s + 0x130, 16)) {
+                    continue;
+                }
+                const u64 views = memory.Read64(s + 0x138);
+                if (args[0] >= views && (args[0] - views) % 0x5548 == 0 &&
+                    (args[0] - views) / 0x5548 < memory.Read32(s + 0x130)) {
+                    g_view_scene.store(s, std::memory_order_relaxed);
+                    LOG_INFO(Kernel_SVC, "OoT VR view: scene {:#x} (x{}), view {}", s, r, (args[0] - views) / 0x5548);
+                    break;
+                }
+            }
+        }
+    }
     {
         static std::array<u64, 16> seen{};
         const u64 key = (caller << 4 | view_index) + 1;
@@ -713,6 +1010,37 @@ bool CallNx2OotVr(Core::System& system, u32 imm, std::span<u64, 8> args) {
     if (SourceMode()) {
         if (display && memory.Read64(args[3]) == main_base + ProjectionVtableOffset) {
             NoteDisplayView(args[2] - 8);
+            // While the item menu freezes the camera update, no camera-source call turns the view: turn the game's
+            // last camera here, once per drawn frame, so the eyes alternate and the head pose is followed.
+            static u64 updates_at_last_view = 0;
+            const u64 updates = g_camera_updates.load(std::memory_order_relaxed);
+            // The camera is double-buffered: the saved copy may come from the other view object of the pair.
+            if (Common::OotVr::ItemMenu().load(std::memory_order_relaxed) && updates == updates_at_last_view &&
+                g_game_camera_view != 0) {
+                memory.WriteBlock(args[2] - 8 + 0x8, g_game_camera.data(), g_game_camera.size());
+                CameraSource(memory, main_base, args[2] - 8, false);
+                // Set-view takes the matrix from x2 but the inverse and the culling planes from x4, another view
+                // object (main+0x33a2c4): give it the turned camera too.
+                if (args[4] != args[2] && args[4] > 8) {
+                    std::array<u8, 0x88> turned;
+                    memory.ReadBlock(args[2], turned.data(), turned.size());
+                    memory.WriteBlock(args[4], turned.data(), turned.size());
+                }
+                static u64 menu_turns = 0;
+                if (++menu_turns % 120 == 1) {
+                    LOG_INFO(Kernel_SVC, "OoT VR camera: item menu: view turned at set-view ({} frames), x2 {:#x} x4 "
+                             "{:#x}", menu_turns, args[2], args[4]);
+                }
+            }
+            if (Common::OotVr::ItemMenu().load(std::memory_order_relaxed)) {
+                static u64 menu_views = 0;
+                if (++menu_views % 60 == 1) {
+                    LOG_INFO(Kernel_SVC, "OoT VR camera: item menu set-view: view {:#x}, saved camera of {:#x}, camera "
+                             "updates {} (last view {}), menu flag now {}", args[2] - 8, g_game_camera_view, updates,
+                             updates_at_last_view, g_menu_now.load(std::memory_order_relaxed));
+                }
+            }
+            updates_at_last_view = updates;
             Common::OotVr::HeadPose drawn;
             if (ViewPose(args[2] - 8, drawn)) {
                 Common::OotVr::RecordApplied(drawn);

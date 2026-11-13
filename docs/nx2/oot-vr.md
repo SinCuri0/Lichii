@@ -69,6 +69,12 @@ Committed:
 - First person at Link's head, with the head hidden.
 - VR HUD: the HUD, prompts, talk box and area title move toward the centre, shifted per eye so they look 1.5 m away.
 - Menus and the big map show on a flat screen 1 m away.
+- The L/R item menu shows at the HUD item slot in stereo. The menu pauses the game camera (camera `+0x88` bit 0), which
+  stops the world draw and the head-pose camera update. Lichii keeps the camera running (svc 0xF8 from the HUD code)
+  and turns the view at set-view while the menu is shown, so the eyes keep alternating. In the headset (owner,
+  2026-11-13) the menu is in 3D, but the scene behind it is frozen and moves with the head: good enough for now. The
+  menu's blurred background (`P_CaptureBG_00`) is shown again; its dark panes stay hidden. How it was found:
+  `oot-vr-research.md`.
 - Videos show on a flat screen (seen by the owner, 2026-11-13). A frame that is not a stereo pair goes to the headset as
   a quad layer (`SubmitFrame` in `vk_oot_vr.cpp`).
 - When the game stalls, the last picture is sent again, so the runtime does not drop to its own view.
@@ -90,7 +96,8 @@ Not done or not known:
 
 Environment variables (read in `vk_oot_vr.cpp` and `svc_nx2_oot_vr.cpp`): `EDEN_NX2_OOT_VR`, `_XR`, `_STEREO`, `_FIRST`,
 `_EYE_SCALE`, `_EYE_FWD`, `_MOVE`, `_HUD`, `_HUD_IN`, `_TEXT`, `_MAP_Y`, `_PROMPT_Y`, `_TALK_Y`, `_MENU_DIST`,
-`_OVERSCAN`, `_LAG`, `_VIEWS`, `_SOURCE`, `_ROOM`, `_ROOM_SHOT`, `_CAPTURE`, `_UI_TRACE`, and the test poses
+`_OVERSCAN`, `_LAG`, `_VIEWS`, `_SOURCE`, `_ROOM`, `_ROOM_SHOT`, `_CAPTURE`, `_UI_TRACE`, `_MENU_VIEW` (0: let the item
+menu pause the world), the debug tools `_MENU_DIFF`, `_VIEW_TRACE`, `_WATCH_VIEW` (`oot-vr-research.md`), and the test poses
 `_FAKE_YAW`, `_FAKE_PITCH`, `_FAKE_TAN`, `_FAKE_IPD`. Each has the prefix `EDEN_NX2_OOT_VR`.
 
 Keys while playing (Windows):

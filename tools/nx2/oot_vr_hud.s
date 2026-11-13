@@ -43,6 +43,10 @@ hud:
     orr w9, w9, w11
 13:
     str w9, [x22, #32]
+    // svc 0xF8 tells the headset whether the item menu is shown, every frame (svc_nx2_oot_vr.cpp).
+    mov x0, x22
+    mov w1, w9
+    svc #0xf8
     adr x20, table
     add x23, x22, #0x30
 next_pane:
@@ -195,8 +199,8 @@ table:
     pane 0x8f87396d, 0x1802, 0, 0, 1920, -1078, RootPane
     pane 0x6b8f8fdd, 0x1802, 0, 0, 0, -1078, RootPane
     pane 0x62fedc9b, 0x0002, 0, 0, -1920, -1078, RootPane
+    pane 0x0c5498a2, 0x0002, 0, 0, 0, 0, RootPane
     pane 0x42fefb65, 0x0092, 0, 0, 1512, 718, RootPane
     pane 0x42fefb65, 0x0040, 0, 0, 0, 0, P_Bg_00
-    pane 0xc5a49707, 0x0040, 0, 0, 0, 0, P_CaptureBG_00
     pane 0xc5a49707, 0x0040, 0, 0, 0, 0, P_Grad_00
     .word 0, 0

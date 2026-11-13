@@ -124,6 +124,7 @@ def main():
     ap.add_argument("--hold-buttons", default="", help="buttons to hold for 3 s each after loading, e.g. L,R, with a shot during each")
     ap.add_argument("--capture", action="store_true",
                     help="frame dumps (colour and depth) in 6 directions from each spot into <out>/<spot>_<face>; use --fake-tan 1,1")
+    ap.add_argument("--poke", default="", help="code bytes to write after loading, e.g. 33f9250=c0035fd6 (main offset=hex)")
     ap.add_argument("--play",action="store_true", help="load the save, then leave the game open: no shots, no test turns")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
@@ -183,6 +184,10 @@ def main():
         if base is None:
             raise RuntimeError("no 'set-view hook live' line in the log: the VR patch did not run")
         step(f"main at {base:#x}")
+        for poke in filter(None, a.poke.split(",")):
+            offset, data = poke.split("=")
+            call("write_memory", {"address": hex(base + int(offset, 16)), "hex": data})
+            step(f"wrote {data} at main+{offset}")
         first, t0 = presents(), time.time()
         time.sleep(5)
         step(f"frame rate: {(presents() - first) / (time.time() - t0):.1f} presents per second")
@@ -231,8 +236,23 @@ def main():
             open(os.path.join(a.out, "dumps", "capture.now"), "w").close()
             step(f"held {button}: frame dump requested")
             time.sleep(4)
+            if os.environ.get("EDEN_NX2_OOT_VR_MENU_TEST_YAW"):
+                # A second dump after Lichii turned the test head pose (120 frames into the menu).
+                open(os.path.join(a.out, "dumps", "capture.now"), "w").close()
+                step(f"held {button}: second frame dump requested (head turned)")
+                time.sleep(4)
             holder.wait(timeout=60)
             time.sleep(2)
+        if a.hold_buttons:
+            # Draws in the frame dumped during each hold: a few hundred means the game stopped drawing the world.
+            manifest = os.path.join(a.out, "dumps", "manifest.jsonl")
+            if os.path.exists(manifest):
+                for line in open(manifest, encoding="utf-8"):
+                    entry = json.loads(line)
+                    if entry.get("kind") == "present":
+                        step(f"draws in the dumped frame: {entry.get('after_draws')}")
+            step("done")
+            return
         def sweep(prefix):
             steps = int(120 / a.sweep)
             for n in range(steps + 1):

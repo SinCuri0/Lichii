@@ -1,5 +1,5 @@
 param([switch]$Headset, [int]$Hold = 10)
-$bat = 'C:\Users\ALEXAN~1\AppData\Local\Temp\claude\b893fa170b82cd1b\f2a7274e-96a7-409f-9875-fb187086db64\scratchpad\lx_build.bat'
+$bat = Join-Path $PSScriptRoot 'oot_vr_build.bat'
 Remove-Item D:\lxc_build.log -ErrorAction SilentlyContinue
 Start-Process -NoNewWindow -FilePath cmd.exe -ArgumentList '/c', "$bat > D:\lxc_build.log 2>&1"
 Start-Sleep 2

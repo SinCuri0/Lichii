@@ -179,6 +179,20 @@ TOOLS = [
         },
     },
     {
+        "name": "write_memory",
+        "description": "Test tool: writes hex bytes (memory order, at most 4 KiB) at a guest address and "
+                       "invalidates the instruction cache there. No stall: only for memory no guest "
+                       "thread runs or reads now.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "address": {"type": ["string", "integer"]},
+                "hex": {"type": "string"},
+            },
+            "required": ["address", "hex"],
+        },
+    },
+    {
         "name": "search_memory",
         "description": "Finds a byte pattern (hex pairs in memory order: little endian, so 1.0f "
                        "is '0000803f') in the mapped guest memory of the heap region (default) or "

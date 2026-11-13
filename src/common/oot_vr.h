@@ -113,6 +113,24 @@ inline std::atomic<bool>& MenuOpen() {
     return open;
 }
 
+/// Set while the L1/R1 item menu is shown (svc 0xF8 from the HUD code, every frame).
+/// Debug: a guest address whose writes the JIT logs (its page must be marked debug). 0: none.
+inline std::atomic<u64>& WriteWatch() {
+    static std::atomic<u64> address{0};
+    return address;
+}
+
+/// Debug: x19..x28 at the last watched write.
+inline std::array<std::atomic<u64>, 10>& WriteWatchRegs() {
+    static std::array<std::atomic<u64>, 10> regs{};
+    return regs;
+}
+
+inline std::atomic<bool>& ItemMenu() {
+    static std::atomic<bool> shown{false};
+    return shown;
+}
+
 /// Distance in metres from the head to the flat menu screen. EDEN_NX2_OOT_VR_MENU_DIST sets the start value.
 inline std::atomic<float>& MenuDistance() {
     static std::atomic<float> distance = EnvFloat("EDEN_NX2_OOT_VR_MENU_DIST", 1.0f);

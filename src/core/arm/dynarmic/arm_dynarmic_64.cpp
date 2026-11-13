@@ -4,11 +4,17 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <atomic>
 #include <cstdlib>
+#include <mutex>
+#include <utility>
+#include <vector>
 #if defined(_M_X64) || defined(__x86_64__)
 #include <immintrin.h>
 #endif
+#include "common/logging.h"
+#include "common/oot_vr.h"
 #include "common/settings.h"
 #include "common/nx2_hitch.h"
 #include "core/arm/dynarmic/arm_dynarmic.h"
@@ -271,6 +277,27 @@ u64 DynarmicCallbacks64::GetCNTPCT() {
 }
 
 bool DynarmicCallbacks64::CheckMemoryAccess(u64 addr, u64 size, Kernel::DebugWatchpointType type) {
+    if (const u64 watch = Common::OotVr::WriteWatch().load(std::memory_order_relaxed);
+        watch != 0 && type == Kernel::DebugWatchpointType::Write && addr < watch + 2 && watch < addr + size) {
+        // Each distinct writer once: the block's PC, x30 and the caller's return address from the frame record.
+        auto& jit = *m_parent.m_jit;
+        const u64 pc = jit.GetPC(), lr = jit.GetRegister(30), fp = jit.GetRegister(29);
+        const u64 ret = m_memory.IsValidVirtualAddressRange(fp + 8, 8) ? m_memory.Read64(fp + 8) : 0;
+        for (int r = 0; r < 10; ++r) {
+            Common::OotVr::WriteWatchRegs()[r].store(jit.GetRegister(19 + r), std::memory_order_relaxed);
+        }
+        static std::mutex mutex;
+        static std::vector<std::pair<u64, u64>> seen;
+        std::scoped_lock lock{mutex};
+        if (seen.size() < 64 && std::find(seen.begin(), seen.end(), std::pair{pc, lr}) == seen.end()) {
+            seen.emplace_back(pc, lr);
+            LOG_INFO(Core_ARM, "Write watch {:#x}: {} bytes at {:#x}, pc {:#x}, x30 {:#x}, frame return {:#x}, "
+                     "old {:#06x}", watch, size, addr, pc, lr, ret, m_memory.Read16(watch));
+        }
+    }
+    if (!m_check_memory_access) {
+        return true;
+    }
     if (!m_check_memory_access) {
         return true;
     }
