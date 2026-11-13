@@ -563,6 +563,8 @@ constexpr float CutTurnCos = 0.9063f; // cos 25 degrees
 constexpr u32 CutBeforeTalk = 60;     ///< camera updates a cut may come before the talk box opens
 constexpr u32 TalkCameraHold = 30;    ///< camera updates the talk camera stays after the talk box closes
 
+bool LinkForward(Core::Memory::Memory& memory, float* fwd);
+
 // A talk camera: a talk box is open and the game's own camera cut to a shot (a jump, not the follow camera).
 void TalkCameraUpdate(Core::Memory::Memory& memory) {
     std::array<float, 3> feet{};
@@ -592,6 +594,17 @@ void TalkCameraUpdate(Core::Memory::Memory& memory) {
         }
     }
     const bool cut = has_last && (jump > CutJumpM || turn_cos < CutTurnCos);
+    static u32 check_count = 0;
+    float link_fwd[3], move[3]{feet[0] - last_feet[0], 0, feet[2] - last_feet[2]};
+    if (has_last && ++check_count % 60 == 0 && Normalize(move) > 1e-3f && LinkForward(memory, link_fwd)) {
+        std::array<float, 3> at;
+        std::memcpy(at.data(), g_game_camera.data() + 0x3C, sizeof(at));
+        float look[3]{at[0] - eye[0], at[1] - eye[1], at[2] - eye[2]};
+        Normalize(look);
+        LOG_INFO(Kernel_SVC, "OoT VR facing check: move.linkfwd {:.2f}, look.linkfwd {:.2f}, look.row3 {:.2f}",
+                 move[0] * link_fwd[0] + move[2] * link_fwd[2], look[0] * link_fwd[0] + look[2] * link_fwd[2],
+                 look[0] * m[8] + look[1] * m[9] + look[2] * m[10]);
+    }
     last_eye = eye, last_feet = feet, has_last = true;
     if (flat) {
         last_fwd = {fwd[0], 0, fwd[2]};
@@ -694,7 +707,18 @@ void CameraSource(Core::Memory::Memory& memory, u64 main_base, u64 view_object, 
         float fwd[3];
         if (Common::OotVr::TalkCamera().load(std::memory_order_relaxed) &&
             Common::OotVr::TalkCameraMode().load(std::memory_order_relaxed) == 2 && LinkForward(memory, fwd)) {
-            const std::array<float, 9> rows{-fwd[2], 0, fwd[0], 0, 1, 0, -fwd[0], 0, -fwd[2]};
+            const float* r0 = &m[0];
+            const float* r1 = &m[4];
+            const float* r2 = &m[8];
+            const float look_sign = r2[0] * dx + r2[1] * dy + r2[2] * dz >= 0 ? 1.0f : -1.0f;
+            const float up_sign = r1[1] >= 0 ? 1.0f : -1.0f;
+            const float c0 = r1[1] * r2[2] - r1[2] * r2[1], c1 = r1[2] * r2[0] - r1[0] * r2[2],
+                        c2 = r1[0] * r2[1] - r1[1] * r2[0];
+            const float side_sign = r0[0] * c0 + r0[1] * c1 + r0[2] * c2 >= 0 ? 1.0f : -1.0f;
+            const float b0 = look_sign * fwd[0], b2 = look_sign * fwd[2];
+            const std::array<float, 9> rows{side_sign * up_sign * b2, 0, -side_sign * up_sign * b0,
+                                            0, up_sign, 0,
+                                            b0, 0, b2};
             for (int i = 0; i < 3; ++i) {
                 for (int k = 0; k < 3; ++k) {
                     m[i * 4 + k] = rows[i * 3 + k];
